@@ -613,10 +613,29 @@
               (println (str "  ... " (- (count hits) 3) " more definitions of " leaf " (qualify with ns/)")))
             0))))))
 
+(defn- signature
+  "def 行の名前より後ろ (arglist か本体の先頭) を 1 行に。無ければ次行が docstring なら
+  その 1 行目。iteration 10 の実測 (defn 600 件): arglist は 55% が def 行、40% は
+  docstring が先 (arglist はその後)。どちらでも 1 行で『何を取るか / 何をするか』が
+  分かるので、agent が outline の後に Read へ行く理由を減らす。80 字で切る。"
+  [lines line sym]
+  (let [l (nth lines (dec line) "")
+        i (.indexOf l sym)
+        rest (if (neg? i) "" (str/trim (subs l (+ i (count sym)))))
+        rest (str/replace rest #"\)+$" "")
+        nxt (str/trim (nth lines line ""))
+        sig (cond (seq rest) rest
+                  (str/starts-with? nxt "\"") (str/replace nxt #"^\"|\"$" "")
+                  (str/starts-with? nxt "[") nxt
+                  :else "")
+        sig (str/replace sig #"\s+" " ")]
+    (if (> (count sig) 80) (str (subs sig 0 79) "…") sig)))
+
 (defn- cmd-outline
   "file (path の末尾一致) か ns (完全一致) の定義を行順に並べる。file を Read する
-  前の地図: 1 行 ≈ 10 tok なので 100 def の file でも ~1k tok で済む。"
-  [target]
+  前の地図: 1 行 ≈ 10 tok なので 100 def の file でも ~1k tok で済む。
+  iteration 10: 各行に signature (arglist か docstring 1 行目) を添える。--bare で消す。"
+  [target opts]
   (let [{:keys [header text error]} (load-index-text)]
     (if error
       (refuse error)
@@ -637,8 +656,12 @@
             (age-warning header)
             (doseq [f (take 5 files)]
               (println (str "== " f))
-              (doseq [{:keys [line kind sym nested]} (sort-by :line (filter #(= f (:file %)) rows))]
-                (println (str "  " line "\t" (if nested "~" "") kind " " sym))))
+              (let [lines (when-not (:bare opts)
+                            (try (str/split-lines (.readFileSync fs (.join path top f) "utf8")) (catch :default _ nil)))]
+                (doseq [{:keys [line kind sym nested]} (sort-by :line (filter #(= f (:file %)) rows))]
+                  (let [sig (when lines (signature lines line sym))]
+                    (println (str "  " line "\t" (if nested "~" "") kind " " sym
+                                  (when (seq sig) (str "  · " sig))))))))
             (when (> (count files) 5)
               (println (str "  ... " (- (count files) 5) " more files match " target " (give a longer path)")))
             0))))))
@@ -684,7 +707,7 @@
   (println "  build [--include-worktrees] [--no-prune] [--full] — scan .cljk/.cljc/.cljs/.clj/.kotoba and write the index")
   (println "  find <term|ns/term> [term...] [--in <path-substr>] [--exact] — symbol name search (exit 1 = 0 hits)")
   (println "  show <symbol|ns/symbol> — definition snippet (file:line + context lines)")
-  (println "  outline <file-suffix|ns> — every definition in a file/namespace, in line order (map before Read)")
+  (println "  outline <file-suffix|ns> [--bare] — every definition in a file/namespace with its signature (map before Read)")
   (println "  status — index header (top / built-at / scanned / symbols) and age")
   2)
 
@@ -707,9 +730,10 @@
         (cmd-show (first rest-args)))
 
       (= cmd "outline")
-      (if (empty? rest-args)
-        (refuse "outline needs a file suffix or a namespace (e.g. kagami/db.cljk or kagami.db)")
-        (cmd-outline (first rest-args)))
+      (let [targets (remove #{"--bare"} rest-args)]
+        (if (empty? targets)
+          (refuse "outline needs a file suffix or a namespace (e.g. kagami/db.cljk or kagami.db)")
+          (cmd-outline (first targets) {:bare (some #{"--bare"} rest-args)})))
 
       (= cmd "status")
       (cmd-status)

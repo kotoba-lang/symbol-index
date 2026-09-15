@@ -312,4 +312,14 @@
   :after  {:script "iteration 9" :correct "8/8" :opening "8/8" :chars-mean 1147 :chars-max 2152 :wall-ms-mean 1566}
   :results ["bench/results/2026-09-15-one-call-iter8.jsonl" "bench/results/2026-09-15-one-call-iter9.jsonl"]
   :note "chars は +12% (snippet が 3 query で増えた) だが、agent 側では 2 call 目 (show / read_file ≈ 1 API call + 数 k tok) が不要になる条件が 8/8 で揃う。agent での実測は hermes のある機で"
-  :verdict :measured}]
+  :verdict :measured}
+
+ ;; ---- iteration 10 (2026-09-15, /loop tick 1) ----
+
+ {:iteration 10 :id :h30-outline-signature
+  :date "2026-09-15"
+  :observation "outline は名前と行番号だけ。agent は『何を取る関数か』を知るために結局 Read へ行く。実測 (defn 600 件、root corpus): arglist が def 行にあるのは 55%、docstring が先 (arglist は後) が 40%、次行に arglist 4%"
+  :fix "outline の各行に signature (def 行の名前より後ろ = arglist + 本体の頭、無ければ docstring 1 行目、80 字) を添える。--bare で従来形"
+  :measured {:outline-kagami-db {:bare-chars 404 :with-signature-chars 1333 :file-chars 7611}
+             :note "signature 付きでも file Read の 1/5.7。agent が Read を省くかは未測定 (hermes 無し)"}
+  :verdict :landed}]

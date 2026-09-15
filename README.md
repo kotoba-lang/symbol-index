@@ -11,7 +11,7 @@
 ```
 find <term>          # どこに在るか。hit ≤3 なら定義の冒頭まで出る (往復 1 回)
 find <ns>/<term> | --in <path> | --exact   # 多いときの絞り込み (出力が次の 1 手を示す)
-outline <file|ns>    # file を Read する前の地図: 定義の行番号一覧 (実測 18 倍軽い)
+outline <file|ns>    # file を Read する前の地図: 行番号 + signature (arglist / docstring 1 行目)
 show <ns/sym>        # 定義の前後 3 行。ns で曖昧性を解く
 ```
 
@@ -115,6 +115,12 @@ hermes の無い機でも測れるように、同じ 8 query で「`find` 1 call
 
 直したこと: exact hit が 1–3 件なら substring hit が混ざっても exact の snippet を出す /
 同じ定義の写し (verify-run・clone、`.clj` と `.cljk`) を 1 行に畳んで `(+N copies)`。
+
+### iteration 10 (2026-09-15) — outline に signature
+
+defn 600 件の実測: arglist が def 行にあるのは 55%、docstring が先なのが 40%。outline の
+各行に「名前より後ろ」(arglist + 本体の頭) か docstring 1 行目を 80 字で添える。
+`outline kagami.db`: 404 → 1,333 chars (file Read 7,611 の 1/5.7)。`--bare` で従来形。
 
 ## 使い方 (kbb / nbb / babashka どれでも)
 

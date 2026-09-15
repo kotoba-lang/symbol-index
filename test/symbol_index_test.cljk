@@ -120,7 +120,8 @@
                "(defn same-name [] :b)\n"))
   ;; exact 1 件 + substring 3 件: exact の snippet だけ出る
   (write! top "orgs/a/src/a/more.cljk"
-          (str "(ns a.more)\n(defn hidden-fn-more [] 1)\n(defn hidden-fn-most [] 1)\n(defn hidden-fn-x [] 1)\n"))
+          (str "(ns a.more)\n(defn hidden-fn-more [] 1)\n(defn hidden-fn-most [] 1)\n(defn hidden-fn-x [] 1)\n"
+               "(defn documented\n  \"Says hi to the caller.\"\n  [who] who)\n"))
   (.symlinkSync fs (.join path top "orgs" "a") (.join path top "link"))
   (write! top "wt/src/wt/core.cljk" "(ns wt.core)\n(defn only-in-worktree [] 1)\n")
   (write! top "wt/.git" (str "gitdir: " top "/orgs/a/.git/worktrees/wt\n"))
@@ -250,13 +251,17 @@
   (let [{:keys [code out]} (run top "find" "hidden-fx" "--in" "orgs/b/")]
     (check! "0 hits with --in: suggestions respect the filter (none leak from orgs/a)"
             (and (= 1 code) (not (re-find #"hidden-fn" out))) out))
-  (let [{:keys [code out]} (run top "outline" "b/core.cljc")]
-    (check! "outline by file suffix lists defs in line order"
+  (let [{:keys [code out]} (run top "outline" "b/core.cljc" "--bare")]
+    (check! "outline --bare by file suffix lists defs in line order"
             (and (= 0 code) (re-find #"(?m)^== orgs/b/src/b/core.cljc\n  1\tns b.core\n  2\tdefn same-name$" out)) out))
   (let [{:keys [code out]} (run top "outline" "a.core")]
-    (check! "outline by ns marks nested defs with ~"
-            (and (= 0 code) (re-find #"(?m)^  5\t~defn inline-cond$" out)
+    (check! "outline by ns marks nested defs with ~ and shows the signature (arglist + body head)"
+            (and (= 0 code) (re-find #"(?m)^  5\t~defn inline-cond  · \[\] 1$" out)
+                 (re-find #"(?m)^  2\tdefn hidden-fn  · \[x\] x$" out)
                  (not (re-find #"deep-string-def" out))) out))
+  (let [{:keys [code out]} (run top "outline" "a.more")]
+    (check! "outline signature falls back to the docstring's first line when the arglist comes later"
+            (and (= 0 code) (re-find #"(?m)^  5\tdefn documented  · Says hi to the caller\.$" out)) out))
   (let [{:keys [code out]} (run top "outline" "nope.core")]
     (check! "outline unknown target REFUSE exit 2"
             (and (= 2 code) (re-find #"(?m)^REFUSE\tno definitions for nope.core" out)) out))
