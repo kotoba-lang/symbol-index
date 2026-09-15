@@ -129,6 +129,13 @@ defn 600 件の実測: arglist が def 行にあるのは 55%、docstring が先
 他 → find)。解釈は 1 行目に出る。agent が 3 つの使い分けを覚える必要が無くなる分、skill
 本文を縮められる (agent 側の実測は hermes のある機で)。
 
+### iteration 12 (2026-09-15) — 索引より新しい file は、その file だけ直す
+
+build 1.6 h 後の root corpus で変更済み file は 0.10% (49/47,353) だが、agent が今編集
+している file こそ次に引く file。`find` / `show` / `outline` は hit の file の mtime が
+built-at より新しければその file だけ再走査して行番号を直し、`(re-located: … was line N)`
+/ `(re-scanned)` と印字する。symbol が消えていれば snippet を出さず build を促す。
+
 ## 使い方 (kbb / nbb / babashka どれでも)
 
 ```bash
