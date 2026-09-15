@@ -203,11 +203,11 @@
   :decision "導入は『skill を置く』だけでは足りない。code を触る cron job には skills: [symbol-index] を付け、対話は hermes chat -s symbol-index。workspace-search skill の step 0 に pointer を置いた (それを見に行った run は従う)"
   :verdict :landed}
 
- ;; ---- iteration 5 (2026-09-15) ----
+ ;; ---- iteration 6 (2026-09-15) ----
  ;; 観測 (phase 計測、root corpus、prune 後 74,419 dir、load 54): walk 121.7 s / scan 40.3 s
  ;; (read 18.8 + regex 13.5) / write 5.9 s。walk が 72%。
 
- {:iteration 5 :id :h16-kotoba-find
+ {:iteration 6 :id :h19-kotoba-find
   :date "2026-09-15"
   :question "オーナー指示: kotoba-lang の find / grep (org-ieee-find / org-ieee-grep) で walk を速くできるか"
   :evaluated {:org-ieee-find "0a9916a" :org-ieee-grep "5f12337" :amu "73ddd261"
@@ -219,7 +219,7 @@
   :verdict :rejected-for-now
   :reason "式 (-prune / -name) が無い、arena 上限で ~3 万 entry で trap、同じ set で /usr/bin/find の 5-6 倍遅い。root corpus (136K dir) は歩けない。grep も同じ arena 設計で、走査対象 5 万 file の regex には向かない。再評価条件: arena reclaim か -prune 相当が入ったとき"}
 
- {:iteration 5 :id :h17-native-find-fast-path
+ {:iteration 6 :id :h20-native-find-fast-path
   :date "2026-09-15"
   :hypothesis "/usr/bin/find -L (skip-dirs を -prune) を fast path にすれば walk が桁で速くなる"
   :ab {:order "find sci find sci" :find-wall-s [93.7 88.0] :sci-build-wall-s [178.6 136.3] :sci-walk-phase-s [131.5 95.2]
@@ -228,7 +228,7 @@
   :verdict :rejected
   :reason "load 90-130 の共有機では walk は I/O bound。native find (全 tree) ≈ SCI walk (prune 後)。SCI overhead は上限でも 3 割。桁は出ない"}
 
- {:iteration 5 :id :h18-drop-per-dir-git-stat
+ {:iteration 6 :id :h21-drop-per-dir-git-stat
   :date "2026-09-15"
   :observation "linked-worktree? が子 dir ごとに .git を statSync (dir 数 = 74K 回の syscall)"
   :fix "その dir を読んだときの dirent (.git が file か) で判定。syscall を 1/dir 減らす"

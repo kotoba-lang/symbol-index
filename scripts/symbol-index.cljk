@@ -93,7 +93,7 @@
   worktree。主 checkout と同じ内容の写しなので既定では走査しない (submodule の
   gitfile は `.git/modules/…` を指すので該当しない)。名前 (`worktrees/`, `_wt-*`)
   ではなく実在する構造で判定する (itonami-maturity-scan の virtualenv? と同じ理由)。
-  iteration 5: 子 dir ごとに `.git` を statSync していた (dir 数と同じ 74K 回) のを
+  iteration 6: 子 dir ごとに `.git` を statSync していた (dir 数と同じ 74K 回) のを
   やめ、その dir を **読んだとき** の dirent (`.git` が file か) で判定する。
   git-entry は readdir が返した `.git` の Dirent か nil。"
   [dir git-entry]

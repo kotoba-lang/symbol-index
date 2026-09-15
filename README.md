@@ -67,7 +67,7 @@ build は 105 s (sys 37 s = stat × 5 万)。→ iteration 3 で対処。
 prune した group は `status` の `pruned-group` 行に必ず出る。そこにある code を探すなら
 `build --no-prune`。
 
-### iteration 5 (2026-09-15) — 「kotoba-lang の find / grep で速くなるか」
+### iteration 6 (2026-09-15) — 「kotoba-lang の find / grep で速くなるか」
 
 phase 内訳 (prune 後 74,419 dir、load 54): **walk 121.7 s** / scan 40.3 s / write 5.9 s。
 
