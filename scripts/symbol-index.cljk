@@ -92,14 +92,15 @@
   "`.git` が **file** で `gitdir: …/.git/worktrees/<name>` を指す = git の linked
   worktree。主 checkout と同じ内容の写しなので既定では走査しない (submodule の
   gitfile は `.git/modules/…` を指すので該当しない)。名前 (`worktrees/`, `_wt-*`)
-  ではなく実在する構造で判定する (itonami-maturity-scan の virtualenv? と同じ理由)。"
-  [dir]
-  (let [g (.join path dir ".git")]
-    (try
-      (let [st (.statSync fs g)]
-        (and (.isFile st)
-             (str/includes? (.readFileSync fs g "utf8") "/worktrees/")))
-      (catch :default _ false))))
+  ではなく実在する構造で判定する (itonami-maturity-scan の virtualenv? と同じ理由)。
+  iteration 6: 子 dir ごとに `.git` を statSync していた (dir 数と同じ 74K 回) のを
+  やめ、その dir を **読んだとき** の dirent (`.git` が file か) で判定する。
+  git-entry は readdir が返した `.git` の Dirent か nil。"
+  [dir git-entry]
+  (boolean
+   (and git-entry (.isFile git-entry)
+        (try (str/includes? (.readFileSync fs (.join path dir ".git") "utf8") "/worktrees/")
+             (catch :default _ false)))))
 
 (defn- gitignored-children
   "top が git repo なら、top **直下** の entry のうち gitignore され、かつ自身が
@@ -193,10 +194,13 @@
                                  (vswap! stats update :unreadable-dirs inc)
                                  #js[]))
                   names (into #{} (map #(.-name %)) entries)
-                  repo (if (and (seq rel) (contains? names ".git")) rel repo)
+                  git-entry (some #(when (= ".git" (.-name %)) %) entries)
+                  repo (if (and (seq rel) git-entry) rel repo)
                   group (group-of rel repo)]
               (cond
                 (contains? @pruned group) nil
+                (and (not (:include-worktrees opts)) (linked-worktree? d git-entry))
+                (vswap! stats update :skipped-worktrees inc)
                 (contains? names "pyvenv.cfg") (vswap! stats update :skipped-venvs inc)
                 :else
                 (let [found (volatile! false)]
@@ -219,9 +223,7 @@
                                 (vswap! seen-files conj rf)
                                 (vswap! out conj rf)))
                             dir?
-                            (if (and (not (:include-worktrees opts)) (linked-worktree? full))
-                              (vswap! stats update :skipped-worktrees inc)
-                              (vswap! next-dirs conj [full (if (or link? aliased?) (realpath full) full) repo]))
+                            (vswap! next-dirs conj [full (if (or link? aliased?) (realpath full) full) repo])
                             :else nil)))))
                   (if @found
                     (vswap! runs assoc group 0)

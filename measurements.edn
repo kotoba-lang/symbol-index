@@ -201,4 +201,36 @@
    "先読み (C) は 8/8 正解、毎 run CLI を 1-2 回呼んで終了。skill 本文は 1 call あたり +1.7k tok (16.9k vs 15.2k)"
    "Hermes は cwd の AGENTS.md と CLAUDE.md を両方注入する。この superproject では両者がほぼ同文なので 1 call の床が ~15k tok になっている (本 iteration の対象外、記録のみ)"]
   :decision "導入は『skill を置く』だけでは足りない。code を触る cron job には skills: [symbol-index] を付け、対話は hermes chat -s symbol-index。workspace-search skill の step 0 に pointer を置いた (それを見に行った run は従う)"
+  :verdict :landed}
+
+ ;; ---- iteration 6 (2026-09-15) ----
+ ;; 観測 (phase 計測、root corpus、prune 後 74,419 dir、load 54): walk 121.7 s / scan 40.3 s
+ ;; (read 18.8 + regex 13.5) / write 5.9 s。walk が 72%。
+
+ {:iteration 6 :id :h19-kotoba-find
+  :date "2026-09-15"
+  :question "オーナー指示: kotoba-lang の find / grep (org-ieee-find / org-ieee-grep) で walk を速くできるか"
+  :evaluated {:org-ieee-find "0a9916a" :org-ieee-grep "5f12337" :amu "73ddd261"
+              :how "amu compile find/core.kotoba --target aarch64-macos --jvm-free → extract-native → package-command.cljk (--fs-scope/--browse-scope = 対象 dir)"}
+  :measured {:kagami {:entries 367 :kotoba-find-s 0.50 :usr-bin-find-s 0.14 :set-identical true}
+             :amu {:entries 8719 :kotoba-find-s 0.67 :usr-bin-find-s 0.12 :files {:kotoba 8166 :usr-bin 8161}}
+             :app-news {:entries 34803 :kotoba-find "KEXE_TRAP SIGILL after 7,272 files" :usr-bin-find-s 1.98}
+             :ceilings {:pairs 4194304 :string-pool-bytes 268435456 :note "arena は reclaim しない (README が明記)。--pairs 20M / --string-pool 400M は loader が拒否"}}
+  :verdict :rejected-for-now
+  :reason "式 (-prune / -name) が無い、arena 上限で ~3 万 entry で trap、同じ set で /usr/bin/find の 5-6 倍遅い。root corpus (136K dir) は歩けない。grep も同じ arena 設計で、走査対象 5 万 file の regex には向かない。再評価条件: arena reclaim か -prune 相当が入ったとき"}
+
+ {:iteration 6 :id :h20-native-find-fast-path
+  :date "2026-09-15"
+  :hypothesis "/usr/bin/find -L (skip-dirs を -prune) を fast path にすれば walk が桁で速くなる"
+  :ab {:order "find sci find sci" :find-wall-s [93.7 88.0] :sci-build-wall-s [178.6 136.3] :sci-walk-phase-s [131.5 95.2]
+       :loadavg-1m-at-start [132.6 128.4 125.6 94.5]
+       :note "find は prune budget を持てないので 136K dir / 96,007 file を歩く。SCI walk は prune 後 74,419 dir"}
+  :verdict :rejected
+  :reason "load 90-130 の共有機では walk は I/O bound。native find (全 tree) ≈ SCI walk (prune 後)。SCI overhead は上限でも 3 割。桁は出ない"}
+
+ {:iteration 6 :id :h21-drop-per-dir-git-stat
+  :date "2026-09-15"
+  :observation "linked-worktree? が子 dir ごとに .git を statSync (dir 数 = 74K 回の syscall)"
+  :fix "その dir を読んだときの dirent (.git が file か) で判定。syscall を 1/dir 減らす"
+  :ab {:order "A B A B" :iter4-wall-s [156.7 172.0] :iter5-wall-s [141.2 150.7] :loadavg-1m-at-start [98.9 127.0 77.8 72.4] :scanned-identical 51588 :ratio-per-round [0.90 0.88]}
   :verdict :landed}]
