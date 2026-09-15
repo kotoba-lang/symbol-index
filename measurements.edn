@@ -398,4 +398,14 @@
   :how-agents-use-it "変更の有無は cat でなく outline の hash 比較 (file の 1/5.7 の chars)。find の (+N identical) で写しを読まない。re-locate の『body unchanged』なら読み直さない"
   :falsified-by "空白正規化を消したコピー → whitespace の check だけ赤 / 畳みの key に file を足したコピー → 畳み関連 5 check 赤"
   :unmeasured-on-agent "実 session で cat の再読みが outline に置き換わるかは transcript で追う (scripts/agent-usage-report.cljk に『同一 path の再読み率』列を足すのが次)"
-  :verdict :landed}]
+  :verdict :landed}
+
+ ;; ---- closing 2026-09-15 ----
+ {:id :closing-2026-09-15
+  :date "2026-09-15"
+  :landed "iteration 2-14 (:h1-:h34) は main に着地、west pin は最新 (superproject の west.yml)。root の scripts/symbol-index.cljk は byte 同一の写し"
+  :for-other-agents "skills/symbol-index/SKILL.md (agent 非依存の正本) + scripts/install.cljk (--check 付き)。CLAUDE.md は superproject 側で 1 行済み、AGENTS.md はそこから生成"
+  :open [{:what "agent 側の K2/K4/K5 (:h24 :h26 :h30 :h31 :h32 :h34)" :how "hermes のある host で bench/hermes_ab.cljk を腕 D として回す / superproject の scripts/agent-usage-report.cljk --since 7 を翌週回して rr-nowrite を baseline (79%) と比べる"}
+         {:what ":h34 の build 時間コスト" :how "v2 と v3 の full build を交互 A/B (未測定)"}
+         {:what "kotoba find (-prune 相当が入ったら)" :how ":h33 の条件が満たされたら walk を差し替えて交互 A/B"}]
+  :resume "kbb --backend sci test/symbol_index_test.cljk → 82/0 を確認してから次の仮説へ"}]

@@ -192,14 +192,22 @@ subdir から呼んでも root の索引を引く。root の外 (例: `$HOME`) �
 でも自分の実体を辿って `scripts/` を見つける (`BASH_SOURCE[0]` は link 側なので、
 辿らないと `~/.local/scripts/` を探して ENOENT になった)。
 
-## Hermes Agent への導入 (iteration 5)
+## 他の agent / CLI への導入
 
-skill は `~/.hermes/skills/software-development/symbol-index/SKILL.md` (user-local)、
-実行体は `~/.local/share/kotoba-lang/symbol-index` を `~/.local/bin/symbol-index` に
-symlink。A/B の実測は `bench/hermes_ab.cljk` と `measurements.edn` の `:iteration 5`:
-skill を**先読み** (`hermes chat -s symbol-index` / cron job の `skills:`) すると
-8/8 正解・token 2.7 分の 1・API call 2.5 分の 1・壁時計 10 分の 1。**置くだけ**では
-agent が選ぶのは 2/8 —— 導入 = 先読みまで。
+```bash
+kbb --backend sci scripts/install.cljk           # ~/.local/bin/symbol-index の symlink + hermes skill (在れば)
+kbb --backend sci scripts/install.cljk --check   # 導入状態の検査。未導入 / ずれは exit 2
+```
+
+- **skill の正本は `skills/symbol-index/SKILL.md`** (agent 非依存: 使い方・判断の規則・数値)。
+  Hermes は `~/.hermes/skills/software-development/symbol-index/` に写し、Claude Code は
+  superproject の CLAUDE.md に 1 行 (install が印字する)、Codex は AGENTS.md (CLAUDE.md から生成)。
+- **Hermes は先読みまでが導入** (`hermes chat -s symbol-index` / cron の `skills:`)。A/B
+  (`bench/hermes_ab.cljk`、`measurements.edn` :iteration 5): 先読みで 8/8 正解・token 2.7 分の
+  1・API call 2.5 分の 1・壁時計 1/10。置くだけでは agent が選ぶのは 2/8。
+- KPI の正本は superproject の ADR-2609152300 (K1 cost-eq / K2 api-calls / K3 ctx0 / K4 ctx-mean
+  / K5 correct / K6 wall)。この repo の代理指標: `bench/one_call.cljk` (K2 / K5)、
+  `scripts/agent-usage-report.cljk` (superproject 側、K1-K4・再読みの無駄)。
 
 ## 自己検査
 
