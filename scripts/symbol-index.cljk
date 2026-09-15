@@ -703,7 +703,8 @@
       (if (some? index) (subvec argv (inc index)) []))))
 
 (defn- usage []
-  (println "usage: kbb --backend sci scripts/symbol-index.cljk build|find|show|outline|status [args]")
+  (println "usage: kbb --backend sci scripts/symbol-index.cljk <query> | build|find|show|outline|status [args]")
+  (println "  <query> — no subcommand needed: *.cljk / a.b → outline, a.b/c → show, anything else → find")
   (println "  build [--include-worktrees] [--no-prune] [--full] — scan .cljk/.cljc/.cljs/.clj/.kotoba and write the index")
   (println "  find <term|ns/term> [term...] [--in <path-substr>] [--exact] — symbol name search (exit 1 = 0 hits)")
   (println "  show <symbol|ns/symbol> — definition snippet (file:line + context lines)")
@@ -737,6 +738,21 @@
 
       (= cmd "status")
       (cmd-status)
+
+      ;; iteration 11: subcommand 無しの引数は形で dispatch する (agent が find / show /
+      ;; outline のどれかを毎回決めなくてよい)。解釈を 1 行目に印字して学べるようにする。
+      ;;   *.cljk 等の拡張子 → outline (file)   a.b (dot、slash 無し) → outline (ns)
+      ;;   a.b/c (slash)      → show (ns/sym)    それ以外 → find
+      (and cmd (not (str/starts-with? cmd "-")))
+      (let [file? (re-find #"\.(cljk|cljc|cljs|clj|kotoba)$" cmd)
+            slash? (str/includes? cmd "/")
+            ns? (and (not slash?) (str/includes? cmd ".") (not (str/includes? cmd " ")))
+            as (cond file? "outline" slash? (if (re-find #"^[^/]+\.[^/]+/" cmd) "show" "find") ns? "outline" :else "find")]
+        (println (str "(interpreted as: " as " " (str/join " " args) ")"))
+        (case as
+          "outline" (cmd-outline cmd {:bare (some #{"--bare"} rest-args)})
+          "show" (cmd-show cmd)
+          (cmd-find args)))
 
       :else
       (usage))))

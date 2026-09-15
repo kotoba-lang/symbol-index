@@ -265,6 +265,15 @@
   (let [{:keys [code out]} (run top "outline" "nope.core")]
     (check! "outline unknown target REFUSE exit 2"
             (and (= 2 code) (re-find #"(?m)^REFUSE\tno definitions for nope.core" out)) out))
+  ;; iteration 11: subcommand 無しの dispatch
+  (let [{:keys [code out]} (run top "hidden-fn")]
+    (check! "bare symbol → find" (and (= 0 code) (re-find #"(?m)^\(interpreted as: find hidden-fn\)$" out) (re-find #"4 hits for hidden-fn" out)) out))
+  (let [{:keys [code out]} (run top "b/core.cljc")]
+    (check! "bare *.cljc path → outline" (and (= 0 code) (re-find #"(?m)^\(interpreted as: outline b/core.cljc\)$" out) (re-find #"== orgs/b/src/b/core.cljc" out)) out))
+  (let [{:keys [code out]} (run top "a.core")]
+    (check! "bare dotted name → outline (ns)" (and (= 0 code) (re-find #"(?m)^\(interpreted as: outline a.core\)$" out) (re-find #"hidden-fn" out)) out))
+  (let [{:keys [code out]} (run top "b.core/same-name")]
+    (check! "bare ns/sym → show" (and (= 0 code) (re-find #"(?m)^\(interpreted as: show b.core/same-name\)$" out) (re-find #"== defn b.core/same-name" out)) out))
   (let [{:keys [code out]} (run top "status")]
     (check! "status exit 0 and prints symbols=" (and (= 0 code) (re-find #"(?m)^symbols\t\d+" out)) out)
     (check! "status lists each pruned group on its own line"
@@ -276,7 +285,10 @@
   (let [{:keys [code out]} (run top)]
     (check! "no args exit 2 with usage" (and (= 2 code) (re-find #"usage:" out)) out))
   (let [{:keys [code out]} (run top "bogus")]
-    (check! "unknown cmd exit 2" (= 2 code) out))
+    (check! "unknown bare word is a find (0 hits → exit 1), not a usage error"
+            (and (= 1 code) (re-find #"interpreted as: find bogus" out)) out))
+  (let [{:keys [code out]} (run top "--bogus")]
+    (check! "unknown flag exit 2 with usage" (and (= 2 code) (re-find #"usage:" out)) out))
   (let [{:keys [code out]} (run top "build" "--include-worktrees")]
     (check! "--include-worktrees keeps the worktree"
             (and (= 0 code) (re-find #"(?m)^SKIPPED-WORKTREES\t0$" out)) out)))
