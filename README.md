@@ -40,7 +40,17 @@ superproject root (orgs/ 含む、51,594 file / 612,791 symbol) で:
 | 空索引 / 空 tree | exit 0 で「0 hits」 | REFUSE exit 2 |
 | test | 無し | 32 check、壊したコピー 3 種で赤を確認 |
 
-build は 105 s (sys 37 s = stat × 5 万)。次の候補は `measurements.edn` の `:build-time`。
+build は 105 s (sys 37 s = stat × 5 万)。→ iteration 3 で対処。
+
+### iteration 3 (2026-09-15)
+
+| 仮説 | before | after |
+|---|---|---|
+| 読めない dir 1 つで build が落ちる (ENAMETOOLONG / EACCES) | crash | `UNREADABLE-DIRS\tn` に数えて続行 |
+| walk が entry ごとに stat + realpath | 67.2 s (walk のみ) | **46.1 s** (dirent、stat は symlink だけ) |
+| scan が SCI の per-line loop | 1,712 ms / 5,000 file | **387 ms** (native `gm` RegExp) |
+| 複数行 `^{:doc …}` の def | 取れない | 5,018 件を新たに索引 (ns 形式も) |
+| build 全体 (root corpus、A B A B 交互) | 134.1 s / 149.2 s (load 50 / 25) | **107.7 s / 121.1 s** (load 24 / 28、各周 −20%) |
 
 ## 使い方 (kbb / nbb / babashka どれでも)
 
@@ -86,8 +96,10 @@ fixture tree を tmp に作り、script を子プロセスで実行して exit c
 - 走査しないもの: linked worktree (`.git` file が `/worktrees/` を指す dir)、
   top 直下で gitignore され `.git` を持たない dir (生成物)。名前でなく構造で判定。
   symlink は realpath で 1 回だけ数え、path も realpath 相対で報告する。
-- 索引する形: 行頭の def form + 名前の前の metadata 読み飛ばし + 行頭
-  `#?(:clj (defn` + indent ≤3 (nested、`~` 印)。indent 4+ は取らない。
+- 索引する形: 行頭の def form + 名前の前の metadata 読み飛ばし (複数行の
+  `^{:doc …}` も) + 行頭 `#?(:clj (defn` + indent ≤3 (nested、`~` 印)。indent 4+ は
+  取らない。行番号は `(def` のある行。
+- 読めない dir (権限 / 異常な名前) は crash せず `UNREADABLE-DIRS` に数える。
 - 拒否は fail-closed: 無引数 / 未知 subcommand / 欠 term / 不在 symbol / 索引の
   top 不一致 / 空索引 / 旧 JSON 形式は `REFUSE\t<理由>` を印字して **exit 2**。
   hit は exit 0、測って 0 件は exit 1。
