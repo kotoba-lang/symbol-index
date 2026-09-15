@@ -103,6 +103,19 @@ cache は `.kotoba-cache/symbol-index.cache.json`。同一 ms・同一 size の�
 | `find` の絞り込み | 無し | `find <ns>/term` / `--in <path-substr>` / `--exact` |
 | prompt cache 向けの出力並び替え | — | 理屈で落ちるので不採用 (cache は会話 prefix 単位) |
 
+### iteration 9 (2026-09-15) — 代理指標 `bench/one_call.cljk`
+
+hermes の無い機でも測れるように、同じ 8 query で「`find` 1 call の出力だけで答えられるか」
+(correct) と「定義の冒頭が出ているか」(opening = 2 call 目不要) を取る。
+
+| | correct | opening | chars 平均 |
+|---|---|---|---|
+| iteration 8 | 8/8 | 5/8 | 1,022 |
+| iteration 9 | 8/8 | **8/8** | 1,147 |
+
+直したこと: exact hit が 1–3 件なら substring hit が混ざっても exact の snippet を出す /
+同じ定義の写し (verify-run・clone、`.clj` と `.cljk`) を 1 行に畳んで `(+N copies)`。
+
 ## 使い方 (kbb / nbb / babashka どれでも)
 
 ```bash

@@ -114,6 +114,13 @@
   (write! top "orgs/b/src/b/core.cljc"
           (str "(ns b.core)\n"
                "(defn same-name [] :b)\n"))
+  ;; b の写し (rename 前の .clj、同じ行): find は 1 行に畳む (+1 copies)
+  (write! top "orgs/c/verify-run/src/b/core.clj"
+          (str "(ns b.core)\n"
+               "(defn same-name [] :b)\n"))
+  ;; exact 1 件 + substring 3 件: exact の snippet だけ出る
+  (write! top "orgs/a/src/a/more.cljk"
+          (str "(ns a.more)\n(defn hidden-fn-more [] 1)\n(defn hidden-fn-most [] 1)\n(defn hidden-fn-x [] 1)\n"))
   (.symlinkSync fs (.join path top "orgs" "a") (.join path top "link"))
   (write! top "wt/src/wt/core.cljk" "(ns wt.core)\n(defn only-in-worktree [] 1)\n")
   (write! top "wt/.git" (str "gitdir: " top "/orgs/a/.git/worktrees/wt\n"))
@@ -137,7 +144,7 @@
 (defn test-build-and-find [top git?]
   (let [{:keys [code out]} (run top "build")]
     (check! "build exit 0" (= 0 code) out)
-    (check! "build prints SCANNED (evidence floor)" (re-find #"(?m)^SCANNED\t4$" out) out)
+    (check! "build prints SCANNED (evidence floor)" (re-find #"(?m)^SCANNED\t6$" out) out)
     (check! "prune: 1,000 consecutive source-less dirs cut the group and say so"
             (re-find #"(?m)^PRUNED\t1\t\(1000 consecutive" out) out)
     (check! "venv: pyvenv.cfg dir skipped and counted"
@@ -208,11 +215,16 @@
     (check! "show absent symbol REFUSE exit 2"
             (and (= 2 code) (re-find #"(?m)^REFUSE\tno exact match for no-such-symbol-xyz" out)) out))
   (let [{:keys [code out]} (run top "find" "hidden-fn")]
-    (check! "find with exactly 1 hit prints the snippet inline (no second round trip)"
-            (and (= 0 code) (re-find #"(?m)^  2\| \(defn \^:private hidden-fn" out)) out)
+    (check! "find: 1 exact + 3 substring hits → the exact hit's snippet is printed (no second round trip)"
+            (and (= 0 code) (re-find #"4 hits for hidden-fn" out)
+                 (re-find #"(?m)^  2\| \(defn \^:private hidden-fn" out)
+                 (not (re-find #"(?m)^  2\| \(defn hidden-fn-more" out))) out)
     (check! "snippet is forward-biased: 1 line before, 6 after (the definition's opening)"
             (and (re-find #"(?m)^  1\| \(ns a.core\)" out) (re-find #"(?m)^  8\| " out) (not (re-find #"(?m)^  9\| " out))) out))
   (let [{:keys [code out]} (run top "find" "same-name")]
+    (check! "identical copies (same sym/kind/line/stem, .clj vs .cljc) fold into one row with +N copies"
+            (and (re-find #"2 hits for same-name \(1 copies folded\)" out)
+                 (re-find #"(?m)^  defn same-name — orgs/b/src/b/core.cljc:2  \(\+1 copies\)$" out)) out)
     (check! "find with 2 hits prints both snippets, each under its own == header"
             (and (= 0 code) (= 2 (count (re-seq #"(?m)^== defn same-name — " out)))
                  (re-find #"(?m)^  2\| \(defn same-name \[\] :b\)" out)) out))

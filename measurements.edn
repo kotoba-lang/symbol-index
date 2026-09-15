@@ -286,4 +286,30 @@
   :date "2026-09-15"
   :hypothesis "find の出力の可変部 (indexed N symbols) を末尾に移すと prompt cache hit が上がる"
   :verdict :rejected-without-measuring
-  :reason "cache は会話 prefix 単位。tool 出力は会話の末尾に足されるので、出力内の並びは prefix の安定性に効かない。効くのは skill 本文と system prompt の安定で、それは既に安定 (:h18 の +1.7k tok は cached)。測る前に理屈で落ちるので測っていない"}]
+  :reason "cache は会話 prefix 単位。tool 出力は会話の末尾に足されるので、出力内の並びは prefix の安定性に効かない。効くのは skill 本文と system prompt の安定で、それは既に安定 (:h18 の +1.7k tok は cached)。測る前に理屈で落ちるので測っていない"}
+
+ ;; ---- iteration 9 (2026-09-15) — agent 無しで測れる代理指標 ----
+ ;; この機に hermes が無いので、Hermes A/B と同じ 8 query に対し `find <sym>` 1 call の出力
+ ;; だけで (a) 期待 file:line が出るか (correct) (b) 定義の冒頭行が snippet として出るか
+ ;; (opening = 2 call 目が要らない条件) を bench/one_call.cljk で測る。
+
+ {:iteration 9 :id :h28-exact-hits-get-snippets
+  :date "2026-09-15"
+  :observation "one_call bench (iteration 8 の find): correct 8/8 だが opening 5/8。落ちた 3 つは exact hit 1-3 件に substring hit (kernel-base → kernel-base-positions …) が混ざり合計 >3 で snippet が出ない"
+  :fix "合計でなく exact hit が 1-3 件なら exact の snippet を出す"
+  :verdict :landed}
+
+ {:iteration 9 :id :h29-fold-copies
+  :date "2026-09-15"
+  :observation "verify-run / clone の写し (同 sym/kind/line/stem、.clj と .cljk) が別 hit として並び、exact が 4 件以上に見える (capability-catalog: 6 exact のうち 3 が写し)"
+  :fix "同 sym/kind/line/stem を 1 行に畳み最短 path を代表、(+N copies) と header の (N copies folded) で数を残す"
+  :verdict :landed}
+
+ {:iteration 9 :id :one-call-bench
+  :date "2026-09-15"
+  :method "kbb --backend sci bench/one_call.cljk (root corpus、8 query、期待 file:line は grep -n で独立確認。q1/q7/q8 の期待 path は cljk rename 後に更新)"
+  :before {:script "iteration 8" :correct "8/8" :opening "5/8" :chars-mean 1022 :chars-max 1674 :wall-ms-mean 1275}
+  :after  {:script "iteration 9" :correct "8/8" :opening "8/8" :chars-mean 1147 :chars-max 2152 :wall-ms-mean 1566}
+  :results ["bench/results/2026-09-15-one-call-iter8.jsonl" "bench/results/2026-09-15-one-call-iter9.jsonl"]
+  :note "chars は +12% (snippet が 3 query で増えた) だが、agent 側では 2 call 目 (show / read_file ≈ 1 API call + 数 k tok) が不要になる条件が 8/8 で揃う。agent での実測は hermes のある機で"
+  :verdict :measured}]
