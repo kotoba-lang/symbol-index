@@ -136,6 +136,13 @@ build 1.6 h 後の root corpus で変更済み file は 0.10% (49/47,353) だが
 built-at より新しければその file だけ再走査して行番号を直し、`(re-located: … was line N)`
 / `(re-scanned)` と印字する。symbol が消えていれば snippet を出さず build を促す。
 
+### iteration 13 (2026-09-15) — 固定点
+
+この機で測れる指標は固定: test 76/0、`one_call` 8/8 · 8/8 (chars 平均 1,147)、root 索引
+51,602 file / 613,286 symbol。**agent 側で未測定のまま残る 5 件** (H24 / H26 / H30 / H31 /
+H32) は hermes のある機で `bench/hermes_ab.cljk` を腕 D として回して腕 C と比べる。
+`measurements.edn` の `:fixpoint` に一覧。捏造した仮説で反復を埋めないためにここで止める。
+
 ## 使い方 (kbb / nbb / babashka どれでも)
 
 ```bash
