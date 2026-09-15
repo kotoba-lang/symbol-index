@@ -146,6 +146,53 @@
       (if (seq segs) (str repo "/" (str/join "/" (take 2 segs))) repo))
     (str/join "/" (take 4 (str/split rel #"/")))))
 
+(def cache-file "symbol-index.cache.json")
+
+(defn- cache-path [] (.join path top index-dir cache-file))
+
+(defn- load-cache
+  "前回 build の sidecar cache (JSON、native parse)。無い / 読めない / top 違い / --full
+  は空。形: {\"v\" \"top\" \"dirs\" {rel {\"m\" mtimeMs \"e\" [[name kind link?] ...] \"w\" worktree?}}
+  \"files\" {rel {\"m\" mtimeMs \"s\" size \"n\" rows \"r\" rows-text}}}。
+  iteration 7: 日次 rebuild で変わる file は僅かなのに毎回 51K file を読み 74K dir を
+  readdir していた。dir は mtime (entry の増減で変わる)、file は mtime+size で
+  変化を判定し、変わっていなければ readdir / read を省く。同一 ms・同一 size の
+  書き換えは見えない (--full で全読み)。"
+  [opts]
+  (if (:full opts)
+    nil
+    (try
+      (let [c (.parse js/JSON (.readFileSync fs (cache-path) "utf8"))]
+        (when (and (= (aget c "v") index-version) (= (aget c "top") top)) c))
+      (catch :default _ nil))))
+
+(defn- dir-entries
+  "dir を読む。cache の mtime が一致すれば cache の entry 列 (readdir も link の stat も
+  無し)。返り値 {:entries [[name kind link?] ...] :cached? bool :mtime ms :wt bool}
+  kind は \"f\" / \"d\" / \"\"。読めない dir は :unreadable true。"
+  [d rel cache]
+  (let [m (try (.-mtimeMs (.statSync fs d)) (catch :default _ nil))
+        hit (when (and m cache) (aget (aget cache "dirs") rel))]
+    (if (and hit (= (aget hit "m") m))
+      {:entries (js->clj (aget hit "e")) :cached? true :mtime m :wt (boolean (aget hit "w"))}
+      (let [raw (try (.readdirSync fs d #js{:withFileTypes true})
+                     (catch :default _ ::unreadable))]
+        (if (= raw ::unreadable)
+          {:entries [] :cached? false :mtime m :wt false :unreadable true}
+          (let [entries (mapv (fn [e]
+                                (let [name (.-name e) link? (.isSymbolicLink e)
+                                      [file? dir?] (if link?
+                                                     (let [st (try (.statSync fs (.join path d name)) (catch :default _ nil))]
+                                                       (if st [(.isFile st) (.isDirectory st)] [false false]))
+                                                     [(.isFile e) (.isDirectory e)])]
+                                  [name (cond file? "f" dir? "d" :else "") link?]))
+                              raw)
+                git (some (fn [[name kind]] (when (= name ".git") kind)) entries)
+                wt (boolean (and (= git "f")
+                                 (try (str/includes? (.readFileSync fs (.join path d ".git") "utf8") "/worktrees/")
+                                      (catch :default _ false))))]
+            {:entries entries :cached? false :mtime m :wt wt}))))))
+
 (defn- walk
   "dir 配下の走査対象 file を返す。west の子 repo は symlink checkout なので
   symlink の **指先** を辿る。visited set (realpath) で symlink loop を断つ。
@@ -165,8 +212,12 @@
   iteration 4: dir の 76% (105K/136K) は source を 1 つも持たない subtree
   (takeout / news resources / onedrive archive / .venv) だった。名前でなく
   「連続 fileless dir 数」で prune し (prune-budget)、`pyvenv.cfg` を持つ dir は
-  virtualenv として歩かない。返り値は {:files [...] :stats {...}}。"
-  [dir opts]
+  virtualenv として歩かない。
+
+  iteration 7: dir ごとに statSync 1 回で mtime を見て、cache と一致すれば readdir を
+  省く (dir-entries)。歩いた dir は new-cache に記録して build の最後に書く。
+  返り値は {:files [...] :stats {...} :dir-cache #js{}}。"
+  [dir opts cache]
   (let [out (volatile! [])
         seen-files (volatile! #{})
         visited (volatile! #{})
@@ -174,7 +225,8 @@
         budget (if (:no-prune opts) js/Infinity prune-budget)
         runs (volatile! {})            ; group -> 連続 fileless dir 数
         pruned (volatile! #{})         ; 打ち切った group
-        stats (volatile! {:dirs 0 :unreadable-dirs 0 :skipped-worktrees 0 :skipped-venvs 0
+        dir-cache #js{}
+        stats (volatile! {:dirs 0 :stat-dirs 0 :cached-dirs 0 :pruned-dirs 0 :unreadable-dirs 0 :skipped-worktrees 0 :skipped-venvs 0
                           :skipped-gitignored (count ignored)
                           :gitignore-checked checked})
         realpath (fn [p] (try (.realpathSync fs p) (catch :default _ p)))]
@@ -189,50 +241,53 @@
               rel (if at-top? "" (subs d (inc (count dir))))]
           (when-not (contains? @visited dreal)
             (vswap! visited conj dreal)
-            (let [entries (try (.readdirSync fs d #js{:withFileTypes true})
-                               (catch :default _
-                                 (vswap! stats update :unreadable-dirs inc)
-                                 #js[]))
-                  names (into #{} (map #(.-name %)) entries)
-                  git-entry (some #(when (= ".git" (.-name %)) %) entries)
-                  repo (if (and (seq rel) git-entry) rel repo)
+            ;; prune 済み group の dir は readdir しない: 親から継いだ repo で group を出し、
+            ;; その dir 自身が repo (.git を持つ) でなければ stat 1 回で打ち切る (nested repo
+            ;; は prune の外に出す = iteration 4 と同じ挙動)。
+            (if (and (contains? @pruned (group-of rel repo))
+                     (not (.existsSync fs (.join path d ".git"))))
+              (vswap! stats update :pruned-dirs inc)
+            (let [{:keys [entries cached? mtime wt unreadable]} (dir-entries d rel cache)
+                  names (into #{} (map first) entries)
+                  repo (if (and (seq rel) (contains? names ".git")) rel repo)
                   group (group-of rel repo)]
+              (vswap! stats update :stat-dirs inc)
+              (when unreadable (vswap! stats update :unreadable-dirs inc))
+              (when cached? (vswap! stats update :cached-dirs inc))
+              (when mtime
+                (aset dir-cache rel #js{:m mtime :w wt :e (clj->js entries)}))
               (cond
                 (contains? @pruned group) nil
-                (and (not (:include-worktrees opts)) (linked-worktree? d git-entry))
+                ;; top 自身が linked worktree でも歩く (agent の作業は worktree 内が標準。
+                ;; iteration 6 で top も skip して SCANNED 0 になる regression を test が掴んだ)
+                (and (not at-top?) (not (:include-worktrees opts)) wt)
                 (vswap! stats update :skipped-worktrees inc)
                 (contains? names "pyvenv.cfg") (vswap! stats update :skipped-venvs inc)
                 :else
                 (let [found (volatile! false)]
                   (vswap! stats update :dirs inc)
-                  (doseq [e entries]
-                    (let [name (.-name e)]
-                      (when-not (or (contains? skip-dirs name)
-                                    (and at-top? (contains? ignored name)))
-                        (let [full (.join path d name)
-                              link? (.isSymbolicLink e)
-                              [file? dir?] (if link?
-                                             (let [st (try (.statSync fs full) (catch :default _ nil))]
-                                               (if st [(.isFile st) (.isDirectory st)] [false false]))
-                                             [(.isFile e) (.isDirectory e)])]
-                          (cond
-                            (and file? (contains? scan-exts (.extname path name)))
-                            (let [rf (if (or link? aliased?) (realpath full) full)]
-                              (vreset! found true)
-                              (when-not (contains? @seen-files rf)
-                                (vswap! seen-files conj rf)
-                                (vswap! out conj rf)))
-                            dir?
-                            (vswap! next-dirs conj [full (if (or link? aliased?) (realpath full) full) repo])
-                            :else nil)))))
+                  (doseq [[name kind link?] entries]
+                    (when-not (or (contains? skip-dirs name)
+                                  (and at-top? (contains? ignored name)))
+                      (let [full (.join path d name)]
+                        (cond
+                          (and (= kind "f") (contains? scan-exts (.extname path name)))
+                          (let [rf (if (or link? aliased?) (realpath full) full)]
+                            (vreset! found true)
+                            (when-not (contains? @seen-files rf)
+                              (vswap! seen-files conj rf)
+                              (vswap! out conj rf)))
+                          (= kind "d")
+                          (vswap! next-dirs conj [full (if (or link? aliased?) (realpath full) full) repo])
+                          :else nil))))
                   (if @found
                     (vswap! runs assoc group 0)
                     (let [n (inc (get @runs group 0))]
                       (vswap! runs assoc group n)
-                      (when (>= n budget) (vswap! pruned conj group))))))))
+                      (when (>= n budget) (vswap! pruned conj group)))))))))
           (recur @next-dirs))
         :done))
-    {:files @out :stats (assoc @stats :pruned-groups (sort @pruned))}))
+    {:files @out :stats (assoc @stats :pruned-groups (sort @pruned)) :dir-cache dir-cache}))
 
 (defn- rel-path [full]
   (if (str/starts-with? full (str top "/"))
@@ -240,9 +295,10 @@
     full))
 
 (defn- scan-file
-  "1 file から [{sym kind file line ns nested}] を返す。`(ns …)` を跨ぐごとに ns を
-  持ち替え、後続の def にその ns を付ける (show の ns/sym 曖昧性解消に使う)。
-  行番号は match の index までの改行を数えて出す (前回 match から差分で数える)。"
+  "1 file から TSV 行 (sym<TAB>kind<TAB>file<TAB>line<TAB>ns<TAB>flags) の列を返す。
+  `(ns …)` を跨ぐごとに ns を持ち替え、後続の def にその ns を付ける (show の ns/sym
+  曖昧性解消に使う)。行番号は match の index までの改行を数えて出す (前回 match から
+  差分で数える)。iteration 7: map でなく行文字列を返す (cache にそのまま入る)。"
   [full rel]
   (let [text (.readFileSync fs full "utf8")
         ns* (volatile! "")
@@ -258,28 +314,41 @@
                      (if (or (neg? i) (>= i idx)) l (recur (inc l) (.indexOf text "\n" (inc i)))))
               kind (aget m 2) sym (aget m 3) nested (some? (aget m 1))]
           (when (= kind "ns") (vreset! ns* sym))
-          (vswap! out conj {:sym sym :kind kind :file rel :line line
-                            :ns (if (= kind "ns") sym @ns*)
-                            :nested nested})
+          (vswap! out conj (str sym "\t" kind "\t" rel "\t" line "\t" (if (= kind "ns") sym @ns*) "\t" (if nested "n" "")))
           (recur line idx))))
     @out))
 
 (defn- build-index
-  "全対象 file から symbol 列と走査統計を作る。統計は evidence floor: SCANNED が
-  0 の索引は書かない (「空の tree」と「top を間違えた」を pass に混ぜない)。"
+  "全対象 file から TSV 行の列 (file ごとの block) と走査統計を作る。統計は evidence
+  floor: SCANNED が 0 の索引は書かない (「空の tree」と「top を間違えた」を pass に
+  混ぜない)。iteration 7: file は statSync で (mtime, size) を見て cache と一致すれば
+  前回の行をそのまま使う (read も regex も無し)。返り値の :blocks は file ごとの
+  行文字列 (改行結合済み)、:symbols は行数。"
   [opts]
-  (let [{:keys [files stats]} (walk top opts)
-        out (volatile! [])
-        st (volatile! (assoc stats :scanned 0 :skipped-size 0 :unreadable 0))]
+  (let [cache (load-cache opts)
+        {:keys [files stats dir-cache]} (walk top opts cache)
+        cfiles (when cache (aget cache "files"))
+        file-cache #js{}
+        blocks (volatile! [])
+        nsyms (volatile! 0)
+        st (volatile! (assoc stats :scanned 0 :cached-files 0 :skipped-size 0 :unreadable 0))]
     (doseq [full files]
       (let [rel (rel-path full)]
         (try
-          (if (<= (.-size (.statSync fs full)) max-file-bytes)
-            (do (vswap! st update :scanned inc)
-                (vswap! out into (scan-file full rel)))
-            (vswap! st update :skipped-size inc))
+          (let [fst (.statSync fs full) m (.-mtimeMs fst) size (.-size fst)
+                hit (when cfiles (aget cfiles rel))]
+            (if (<= size max-file-bytes)
+              (let [[n text] (if (and hit (= (aget hit "m") m) (= (aget hit "s") size))
+                               (do (vswap! st update :cached-files inc) [(aget hit "n") (aget hit "r")])
+                               (let [rows (scan-file full rel)] [(count rows) (str/join "\n" rows)]))]
+                (vswap! st update :scanned inc)
+                (vswap! nsyms + n)
+                (aset file-cache rel #js{:m m :s size :n n :r text})
+                (when (pos? n) (vswap! blocks conj text)))
+              (vswap! st update :skipped-size inc)))
           (catch :default _ (vswap! st update :unreadable inc)))))
-    {:symbols @out :stats @st}))
+    {:blocks @blocks :symbols @nsyms :stats @st
+     :cache #js{:v index-version :top top :dirs dir-cache :files file-cache}}))
 
 ;; ---------------------------------------------------------------- TSV v2
 ;; header: #symbol-index<TAB>v2<TAB>key=value ...
@@ -288,7 +357,7 @@
 (defn- index-path [] (.join path top index-dir index-file))
 
 (defn- write-index
-  [{:keys [symbols stats]}]
+  [{:keys [blocks symbols stats cache]}]
   (let [dir (.join path top index-dir)
         header (str "#symbol-index\t" index-version
                     "\ttop=" top
@@ -303,13 +372,14 @@
                     "\tskipped-venvs=" (:skipped-venvs stats)
                     "\tpruned=" (count (:pruned-groups stats))
                     "\tpruned-groups=" (str/join ";" (:pruned-groups stats))
-                    "\tsymbols=" (count symbols))
-        rows (map (fn [{:keys [sym kind file line ns nested]}]
-                    (str sym "\t" kind "\t" file "\t" line "\t" ns "\t" (if nested "n" "")))
-                  symbols)]
+                    "\tcached-dirs=" (:cached-dirs stats)
+                    "\tcached-files=" (:cached-files stats)
+                    "\tsymbols=" symbols)]
     (when-not (.existsSync fs dir)
       (.mkdirSync fs dir #js{:recursive true}))
-    (.writeFileSync fs (index-path) (str header "\n" (str/join "\n" rows) "\n") "utf8")))
+    (.writeFileSync fs (index-path) (str header "\n" (str/join "\n" blocks) "\n") "utf8")
+    ;; sidecar cache は索引の後に書く (索引だけ在って cache が無い状態は許容、逆は不可)
+    (.writeFileSync fs (cache-path) (.stringify js/JSON cache) "utf8")))
 
 (defn- parse-header
   "先頭行を {:version :top :scanned :symbols ...} に。v1 (JSON) や壊れた先頭は nil。"
@@ -344,13 +414,17 @@
     (println (str "UNREADABLE\t" (:unreadable stats)))
     (println (str "UNREADABLE-DIRS\t" (:unreadable-dirs stats)))
     (println (str "SKIPPED-VENVS\t" (:skipped-venvs stats)))
+    (println (str "CACHED-DIRS\t" (:cached-dirs stats) "\tof " (:stat-dirs stats)
+                  (if (:full opts) "\t(--full: cache ignored)" "")))
+    (println (str "CACHED-FILES\t" (:cached-files stats) "\tof " (:scanned stats)))
+    (println (str "PRUNED-DIRS\t" (:pruned-dirs stats) "\t(queued under a pruned group; 1 stat each, no readdir)"))
     (println (str "PRUNED\t" (count (:pruned-groups stats))
                   (when (seq (:pruned-groups stats))
                     (str "\t(" prune-budget " consecutive dirs without source; see `status`, or build --no-prune)"))))
     (if (zero? (:scanned stats))
       (refuse "scanned 0 files under " top " — empty tree or wrong top (set CLAUDE_PROJECT_DIR or cd)")
       (do (write-index built)
-          (println (str "indexed " (count symbols) " symbols -> " index-dir "/" index-file))
+          (println (str "indexed " symbols " symbols -> " index-dir "/" index-file))
           0))))
 
 (defn- load-index-text
@@ -408,14 +482,17 @@
   (str "  " (if nested "~" "") kind " " sym " — " file ":" line))
 
 (defn- snippet
-  "file の line から前後 ctx 行を返す。"
-  [file line & [ctx]]
-  (let [ctx (or ctx 3)
+  "file の line の 1 行前から、定義の冒頭 after 行 (既定 6) を返す。iteration 7 で
+  前後対称 (±3) から前 1 / 後 6 に変えた: agent の問いは「定義の冒頭を見せて」で、
+  def 行の *前* の 3 行は docstring でも本体でもない (Hermes A/B の 8 query 全部が
+  find の後に show か read_file をもう 1 回呼んでいた)。"
+  [file line & [after]]
+  (let [after (or after 6)
         full (.join path top file)]
     (try
       (let [lines (str/split-lines (.readFileSync fs full "utf8"))
-            from (max 0 (- line (inc ctx)))
-            to (min (count lines) (+ line ctx))]
+            from (max 0 (- line 2))
+            to (min (count lines) (+ line after))]
         (str/join "\n" (map #(str "  " (inc %) "| " (nth lines %))
                             (range from to))))
       (catch :default _ "  (unreadable)"))))
@@ -435,9 +512,11 @@
           (println (fmt-hit h)))
         (when (> (count hits) find-limit)
           (println (str "  ... " (- (count hits) find-limit) " more (narrow the term)")))
-        ;; 1 件なら show を待たずに snippet まで出す (round trip を 1 つ減らす)
-        (when (= 1 (count hits))
-          (let [{:keys [file line]} (first hits)]
+        ;; hit が 3 件以下なら show を待たずに全部の snippet を出す (round trip を 1 つ減らす。
+        ;; iteration 2 は 1 件のときだけだった; Hermes A/B では全 query が 2 call だった)
+        (when (<= 1 (count hits) 3)
+          (doseq [{:keys [file line sym kind]} ranked]
+            (when (> (count hits) 1) (println (str "== " kind " " sym " — " file ":" line)))
             (println (snippet file line))))
         (if (seq hits) 0 1)))))
 
@@ -537,7 +616,7 @@
 
 (defn- usage []
   (println "usage: kbb --backend sci scripts/symbol-index.cljk build|find|show|outline|status [args]")
-  (println "  build [--include-worktrees] [--no-prune] — scan .cljk/.cljc/.cljs/.clj/.kotoba and write the index")
+  (println "  build [--include-worktrees] [--no-prune] [--full] — scan .cljk/.cljc/.cljs/.clj/.kotoba and write the index")
   (println "  find <term> [term...] — case-insensitive substring search over symbol names (exit 1 = 0 hits)")
   (println "  show <symbol|ns/symbol> — definition snippet (file:line + context lines)")
   (println "  outline <file-suffix|ns> — every definition in a file/namespace, in line order (map before Read)")
@@ -549,7 +628,8 @@
     (cond
       (= cmd "build")
       (do-build {:include-worktrees (some #{"--include-worktrees"} rest-args)
-                 :no-prune (some #{"--no-prune"} rest-args)})
+                 :no-prune (some #{"--no-prune"} rest-args)
+                 :full (some #{"--full"} rest-args)})
 
       (= cmd "find")
       (if (empty? rest-args)

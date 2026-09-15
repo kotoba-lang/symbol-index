@@ -233,4 +233,34 @@
   :observation "linked-worktree? が子 dir ごとに .git を statSync (dir 数 = 74K 回の syscall)"
   :fix "その dir を読んだときの dirent (.git が file か) で判定。syscall を 1/dir 減らす"
   :ab {:order "A B A B" :iter4-wall-s [156.7 172.0] :iter5-wall-s [141.2 150.7] :loadavg-1m-at-start [98.9 127.0 77.8 72.4] :scanned-identical 51588 :ratio-per-round [0.90 0.88]}
-  :verdict :landed}]
+  :verdict :landed}
+
+ ;; ---- iteration 7 (2026-09-15) ----
+ ;; 目標の置き直し (オーナー指示): build の速さそのものではなく、agent が 1 task を
+ ;; 少ない think / tool call / token で、精度を落とさず終えること。build は「索引が古くて
+ ;; 使えない」を無くすためにあり、日次 rebuild が軽いほど索引は新しい。
+
+ {:iteration 7 :id :h22-incremental-build
+  :date "2026-09-15"
+  :observation "毎回 51K file を読み 74K dir を readdir するが、日次で変わる file は僅か"
+  :fix "sidecar cache (symbol-index.cache.json): dir は mtime、file は mtime+size が一致すれば readdir / read を省き前回の行を再利用。--full で無効。prune 済み group の dir は stat 1 回で打ち切る"
+  :ab {:order "full warm full warm" :full-wall-s [191.1 179.6] :warm-wall-s [85.1 104.5]
+       :loadavg-1m-at-start [126.3 87.7 80.1 81.5]
+       :warm-cache-hits {:dirs "93,601 / 74,424 (分母は walk 済み dir; その後 stat-dirs に直した)" :files "51,598 / 51,600"}
+       :correctness "warm の SCANNED / symbols (51,600 / 613,286) は次の full と同一。test は cold と warm の row 集合同一、file 書換 / 追加 / 削除 / --full を pin"}
+  :caveat "同一 ms・同一 size の書き換えは見えない (--full)。symlink 先の型変化は親 dir の mtime に出ない"
+  :verdict :landed}
+
+ {:iteration 7 :id :h23-top-is-worktree-regression
+  :date "2026-09-15"
+  :observation "iteration 6 の変更で top 自身が linked worktree のとき top を skip し SCANNED 0 で REFUSE (agent の作業は worktree 内が標準なので致命的)。worktree で build した瞬間に発覚"
+  :fix "top は worktree 判定の対象外。test: top が gitfile worktree でも SCANNED 1"
+  :verdict :landed}
+
+ {:iteration 7 :id :h24-find-answers-in-one-call
+  :date "2026-09-15"
+  :observation "Hermes A/B の arm C (:h18) は 8/8 が find → show|read_file の 2 tool call / 3 API call。find が定義の冒頭を返せば 2 回目は要らない"
+  :fix "find は hit ≤3 なら全 hit の snippet を出す (iteration 2 は 1 hit のときだけ)。snippet は前 1 行 / 後 6 行 (定義の冒頭) に変更 (±3 では def 行の前 3 行が docstring でも本体でもない)"
+  :expected {:tool-calls "2 → 1" :api-calls "3 → 2"}
+  :verdict :landed-unmeasured-on-agent
+  :how-to-measure "hermes のある機で bench/hermes_ab.cljk D-preloaded-v7 <out> を回し、by-tool の 2 call 目が消えるか・correct 8/8 が保たれるかを見る (この機には hermes が無い)"}]
