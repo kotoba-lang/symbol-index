@@ -478,8 +478,9 @@
      file]))
 
 (defn- fmt-hit
-  [{:keys [sym kind file line nested]}]
-  (str "  " (if nested "~" "") kind " " sym " — " file ":" line))
+  [{:keys [sym kind file line nested copies]}]
+  (str "  " (if nested "~" "") kind " " sym " — " file ":" line
+       (when (and copies (pos? copies)) (str "  (+" copies " copies)"))))
 
 (defn- snippet
   "file の line の 1 行前から、定義の冒頭 after 行 (既定 6) を返す。iteration 7 で
@@ -543,15 +544,24 @@
                       distinct
                       (filter keep?))
             term0 (str/lower-case (first leafs))
-            ranked (sort-by #(rank-key term0 %) hits)
-            n (count hits)]
+            ;; 同じ定義の写し (同 sym/kind/line/basename、verify-run や clone の copy) は 1 行に
+            ;; 畳み、最短 path を代表にして :copies に残りの数を持つ (iteration 9)
+            ranked (->> (sort-by #(rank-key term0 %) hits)
+                        ;; 拡張子は見ない: .clj → .cljk の rename 前の写しも同じ定義
+                        (group-by (fn [{:keys [sym kind line file]}] [sym kind line (.basename path file (.extname path file))]))
+                        vals
+                        (map (fn [grp] (assoc (first grp) :copies (dec (count grp)))))
+                        (sort-by #(rank-key term0 %)))
+            n (count ranked)
+            exact (filter #(zero? (first (rank-key term0 %))) ranked)]
         (println (str "indexed " (:symbols header) " symbols, " n " hits for " (str/join " " terms)
+                      (when (> (count hits) n) (str " (" (- (count hits) n) " copies folded)"))
                       (when in-filter (str " --in " in-filter)) (when exact? " --exact")))
         (age-warning header)
         (if (<= n find-limit)
           (doseq [h ranked] (println (fmt-hit h)))
-          (let [n-exact (count (filter #(zero? (first (rank-key term0 %))) ranked))
-                repos (map (comp repo-of :file) hits)
+          (let [n-exact (count exact)
+                repos (map (comp repo-of :file) ranked)
                 by-repo (->> repos frequencies (sort-by (comp - val)) (take 12))]
             (println (str "  too many to list: " n-exact " exact, " (- n n-exact) " substring, in "
                           (count (distinct repos)) " repos. Top repos:"))
@@ -563,8 +573,13 @@
                           "  |  find <ns>/" (first leafs)))))
         ;; hit が 3 件以下なら show を待たずに全部の snippet を出す (round trip を 1 つ減らす。
         ;; iteration 2 は 1 件のときだけだった; Hermes A/B では全 query が 2 call だった)
-        (when (<= 1 n 3)
-          (doseq [{:keys [file line sym kind]} ranked]
+        ;; iteration 9: 合計でなく **exact hit** が 1-3 件なら exact の snippet を出す。substring
+        ;; hit (kernel-base → kernel-base-positions …) が混ざって合計 >3 になり、agent が
+        ;; show をもう 1 回呼ぶ形が one_call bench で 3/8 あった
+        (let [pick (cond (<= 1 (count exact) 3) exact
+                         (<= 1 n 3) ranked
+                         :else nil)]
+          (doseq [{:keys [file line sym kind]} pick]
             (when (> n 1) (println (str "== " kind " " sym " — " file ":" line)))
             (println (snippet file line))))
         (when (zero? n) (suggest-near text (first leafs) keep?))
