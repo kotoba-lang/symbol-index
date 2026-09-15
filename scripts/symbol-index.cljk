@@ -76,8 +76,17 @@
       実測 3,393 行)。4 桁以上は test の文字列内 code が多いので取らない。
     * 名前の前の metadata `^:private` / `^{:doc \"…\"}` / `^String` を読み飛ばす
       (iteration 1 では 38,894 件 = 5% が `^:private` という名前で索引に載った)。
+  iteration 3: 行ごとでなく file 全文に `gm` で当てる native RegExp。SCI の
+  per-line loop (5,000 file で 1,712 ms) が 387 ms になり、複数行に跨る
+  `^{:doc \"…\"}\\n  name` の def (per-line では取れなかった) も名前と行を拾う。
+  indent は `[ \\t]{1,3}` にする (`\\s` だと `^` の後の空行を跨いで誤る)。
   group 1 = reader-cond / indent の有無 (nested 判定)、2 = kind、3 = name。"
-  #"^((?:#\?\(:\w+\s+)|\s{1,3})?\((defn|defn-|def|defonce|defmacro|defmulti|defmethod|defprotocol|defrecord|deftype|ns|deftest)\s+(?:(?:\^\{[^}]*\}|\^\S+)\s+)*([^\s\^\(\)\[\]\{\}\"]+)")
+  (js/RegExp.
+   (str "^((?:#\\?\\(:\\w+\\s+)|[ \\t]{1,3})?"
+        "\\((defn|defn-|def|defonce|defmacro|defmulti|defmethod|defprotocol|defrecord|deftype|ns|deftest)"
+        "\\s+(?:(?:\\^\\{[^}]*\\}|\\^\\S+)\\s+)*"
+        "([^\\s\\^\\(\\)\\[\\]\\{\\}\"]+)")
+   "gm"))
 
 (defn- linked-worktree?
   "`.git` が **file** で `gitdir: …/.git/worktrees/<name>` を指す = git の linked
@@ -118,48 +127,62 @@
 
 (defn- walk
   "dir 配下の走査対象 file を返す。west の子 repo は symlink checkout なので
-  symlink の **指先** を辿る (statSync)。visited set (realpath) で symlink loop
-  を断つ。⚠ Node Stats の isFile/isDirectory は method — (.-isFile stat) は
-  関数が返るだけで真偽にならない。
+  symlink の **指先** を辿る。visited set (realpath) で symlink loop を断つ。
 
   iteration 2: 返す path は **realpath** にする。iteration 1 は symlink 側の path
   を返していたので `worktrees/kotoba-lang/kagami/...` が先に踏まれると正本の
   `orgs/kotoba-lang/kagami/...` が索引から消えた (実測: apply-pin-advance が
-  worktrees/ 側 1 件のみ)。返り値は {:files [...] :stats {...}}。"
+  worktrees/ 側 1 件のみ)。
+
+  iteration 3: readdirSync withFileTypes で dirent の種別を使い、statSync は
+  symlink のときだけ、realpathSync は symlink か symlink 配下 (aliased) のとき
+  だけ呼ぶ (同一 tree で 67 s → 46 s)。⚠ Node Stats / Dirent の isFile 等は
+  method — (.-isFile e) は関数が返るだけで真偽にならない。読めない dir
+  (EACCES / ENAMETOOLONG、実測: 名前が shell script 全文の dir が在った) は
+  落とさず :unreadable-dirs に数える。返り値は {:files [...] :stats {...}}。"
   [dir opts]
   (let [out (volatile! [])
         seen-files (volatile! #{})
         visited (volatile! #{})
         {ignored :names checked :checked} (gitignored-children)
-        stats (volatile! {:dirs 0 :skipped-worktrees 0
+        stats (volatile! {:dirs 0 :unreadable-dirs 0 :skipped-worktrees 0
                           :skipped-gitignored (count ignored)
-                          :gitignore-checked checked})]
-    (loop [dirs [dir]]
-      (if-let [d (first dirs)]
-        (let [real (try (.realpathSync fs d) (catch :default _ d))
-              next-dirs (volatile! (rest dirs))
-              at-top? (= d dir)]
-          (when-not (contains? @visited real)
-            (vswap! visited conj real)
+                          :gitignore-checked checked})
+        realpath (fn [p] (try (.realpathSync fs p) (catch :default _ p)))]
+    ;; queue entry = [path realpath]; aliased? = path と realpath が違う (symlink 配下)
+    (loop [dirs [[dir (realpath dir)]]]
+      (if-let [[d dreal] (first dirs)]
+        (let [next-dirs (volatile! (rest dirs))
+              at-top? (= d dir)
+              aliased? (not= d dreal)]
+          (when-not (contains? @visited dreal)
+            (vswap! visited conj dreal)
             (vswap! stats update :dirs inc)
-            (doseq [name (.readdirSync fs d)]
-              (if (or (contains? skip-dirs name)
-                      (and at-top? (contains? ignored name)))
-                nil
-                (let [full (.join path d name)
-                      stat (try (.statSync fs full) (catch :default _ nil))]
-                  (cond
-                    (nil? stat) nil
-                    (and (.isFile stat) (contains? scan-exts (.extname path name)))
-                    (let [rf (try (.realpathSync fs full) (catch :default _ full))]
-                      (when-not (contains? @seen-files rf)
-                        (vswap! seen-files conj rf)
-                        (vswap! out conj rf)))
-                    (.isDirectory stat)
-                    (if (and (not (:include-worktrees opts)) (linked-worktree? full))
-                      (vswap! stats update :skipped-worktrees inc)
-                      (vswap! next-dirs conj full))
-                    :else nil)))))
+            (let [entries (try (.readdirSync fs d #js{:withFileTypes true})
+                               (catch :default _
+                                 (vswap! stats update :unreadable-dirs inc)
+                                 #js[]))]
+              (doseq [e entries]
+                (let [name (.-name e)]
+                  (when-not (or (contains? skip-dirs name)
+                                (and at-top? (contains? ignored name)))
+                    (let [full (.join path d name)
+                          link? (.isSymbolicLink e)
+                          [file? dir?] (if link?
+                                         (let [st (try (.statSync fs full) (catch :default _ nil))]
+                                           (if st [(.isFile st) (.isDirectory st)] [false false]))
+                                         [(.isFile e) (.isDirectory e)])]
+                      (cond
+                        (and file? (contains? scan-exts (.extname path name)))
+                        (let [rf (if (or link? aliased?) (realpath full) full)]
+                          (when-not (contains? @seen-files rf)
+                            (vswap! seen-files conj rf)
+                            (vswap! out conj rf)))
+                        dir?
+                        (if (and (not (:include-worktrees opts)) (linked-worktree? full))
+                          (vswap! stats update :skipped-worktrees inc)
+                          (vswap! next-dirs conj [full (if (or link? aliased?) (realpath full) full)]))
+                        :else nil)))))))
           (recur @next-dirs))
         :done))
     {:files @out :stats @stats}))
@@ -171,18 +194,27 @@
 
 (defn- scan-file
   "1 file から [{sym kind file line ns nested}] を返す。`(ns …)` を跨ぐごとに ns を
-  持ち替え、後続の def にその ns を付ける (show の ns/sym 曖昧性解消に使う)。"
+  持ち替え、後続の def にその ns を付ける (show の ns/sym 曖昧性解消に使う)。
+  行番号は match の index までの改行を数えて出す (前回 match から差分で数える)。"
   [full rel]
   (let [text (.readFileSync fs full "utf8")
         ns* (volatile! "")
         out (volatile! [])]
-    (doseq [[i line] (map-indexed vector (str/split-lines text))]
-      (when-let [m (re-find def-form-re line)]
-        (let [kind (nth m 2) sym (nth m 3) nested (some? (nth m 1))]
+    (set! (.-lastIndex def-form-re) 0)
+    (loop [line 1 from 0]
+      (when-let [m (.exec def-form-re text)]
+        (let [;; 行は `(def` の位置で数える。group 1 が `#?(:clj\n   ` のとき match は
+              ;; 前の行から始まるので、その長さ分ずらす (iter2 と同じ行に揃える)
+              idx (+ (.-index m) (count (or (aget m 1) "")))
+              ;; from..idx の改行数を native indexOf で数える
+              line (loop [l line i (.indexOf text "\n" from)]
+                     (if (or (neg? i) (>= i idx)) l (recur (inc l) (.indexOf text "\n" (inc i)))))
+              kind (aget m 2) sym (aget m 3) nested (some? (aget m 1))]
           (when (= kind "ns") (vreset! ns* sym))
-          (vswap! out conj {:sym sym :kind kind :file rel :line (inc i)
+          (vswap! out conj {:sym sym :kind kind :file rel :line line
                             :ns (if (= kind "ns") sym @ns*)
-                            :nested nested}))))
+                            :nested nested})
+          (recur line idx))))
     @out))
 
 (defn- build-index
@@ -220,6 +252,7 @@
                     "\tskipped-gitignored=" (:skipped-gitignored stats)
                     "\tgitignore-checked=" (:gitignore-checked stats)
                     "\tunreadable=" (:unreadable stats)
+                    "\tunreadable-dirs=" (:unreadable-dirs stats)
                     "\tsymbols=" (count symbols))
         rows (map (fn [{:keys [sym kind file line ns nested]}]
                     (str sym "\t" kind "\t" file "\t" line "\t" ns "\t" (if nested "n" "")))
@@ -259,6 +292,7 @@
     (println (str "SKIPPED-GITIGNORED\t" (:skipped-gitignored stats)
                   (if (:gitignore-checked stats) "" "\t(not checked: no git or top is not a repo)")))
     (println (str "UNREADABLE\t" (:unreadable stats)))
+    (println (str "UNREADABLE-DIRS\t" (:unreadable-dirs stats)))
     (if (zero? (:scanned stats))
       (refuse "scanned 0 files under " top " — empty tree or wrong top (set CLAUDE_PROJECT_DIR or cd)")
       (do (write-index built)

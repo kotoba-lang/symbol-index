@@ -66,7 +66,8 @@
   (vswap! checks inc)
   (if ok?
     (println (str "ok\t" label))
-    (do (println (str "FAIL\t" label "\n" detail))
+    (do (println (str "FAIL\t" label "\n"
+                      (if (> (count detail) 1500) (str (subs detail 0 1500) "\n  … (" (count detail) " chars)") detail)))
         (vswap! failed conj label))))
 
 (defn mk-tmp [tag]
@@ -90,8 +91,14 @@
                "(def ^{:doc \"d\"} doc-val 1)\n"
                "(defn same-name [] :a)\n"
                "#?(:clj (defn inline-cond [] 1))\n"
+               "#?(:cljs\n   (defn split-cond [] 1))\n"
                "(comment\n  (defn nested-fn [] 2))\n"
-               "    (defn deep-string-def [] 3)\n"))
+               "    (defn deep-string-def [] 3)\n"
+               "\n\n(def ^{:doc \"multi\n  line doc\"}\n  multiline-meta 7)\n"))
+  ;; 読めない dir: 中に def を置き、mode 000 にする (root で走ると読めてしまうので
+  ;; その場合は check 側で geteuid を見て skip 扱いにする)
+  (write! top "locked/x.cljk" "(defn only-in-locked [] 1)\n")
+  (.chmodSync fs (.join path top "locked") 0)
   (write! top "orgs/b/src/b/core.cljc"
           (str "(ns b.core)\n"
                "(defn same-name [] :b)\n"))
@@ -119,6 +126,10 @@
   (let [{:keys [code out]} (run top "build")]
     (check! "build exit 0" (= 0 code) out)
     (check! "build prints SCANNED (evidence floor)" (re-find #"(?m)^SCANNED\t3$" out) out)
+    (if (zero? (.geteuid js/process))
+      (println "skip\tunreadable dir (running as root, chmod 0 is readable)")
+      (check! "unreadable dir is counted, not a crash"
+              (re-find #"(?m)^UNREADABLE-DIRS\t1$" out) out))
     (check! "build boundary: SKIPPED-SIZE 1 (max+1 skipped, max exactly scanned)"
             (re-find #"(?m)^SKIPPED-SIZE\t1$" out) out)
     (check! "build skips linked worktree" (re-find #"(?m)^SKIPPED-WORKTREES\t1$" out) out)
@@ -146,6 +157,12 @@
             (and (re-find #"(?m)^inline-cond\tdefn\t[^\n]*\tn$" idx)
                  (re-find #"(?m)^nested-fn\tdefn\t[^\n]*\tn$" idx))
             idx)
+    (check! "multi-line ^{:doc} metadata: name and the (def line, not the name's line"
+            (re-find #"(?m)^multiline-meta\tdef\torgs/a/src/a/core.cljk\t13\ta.core\t$" idx) idx)
+    (check! "blank lines before a def do not turn it into nested"
+            (re-find #"(?m)^multiline-meta\tdef\t[^\n]*\t$" idx) idx)
+    (check! "reader-cond split over two lines: line is the (defn line, nested"
+            (re-find #"(?m)^split-cond\tdefn\torgs/a/src/a/core.cljk\t7\ta.core\tn$" idx) idx)
     (check! "4+ space indent is not indexed"
             (not (re-find #"deep-string-def" idx)) idx)
     (check! "ns column filled from the file's (ns …)"

@@ -89,4 +89,37 @@
   :date "2026-09-15"
   :measured {:build-wall-s 105.6 :scanned 51594 :symbols 612791}
   :note "iteration 1 の build 時間は未測定。walk の sys time 37 s が支配的 (statSync + realpathSync × 5 万)。次の仮説候補: readdirSync withFileTypes で stat を減らす"
-  :verdict :measured-only}]
+  :verdict :measured-only}
+
+ ;; ---- iteration 3 (2026-09-15) ----
+ ;; 反証で見つけた形: 名前が shell script 全文の dir (worktrees/kotoba-lang/kotoba-lang/#!...)
+ ;; で readdirSync が ENAMETOOLONG を投げ、build 全体が落ちた。「実行できないとき何を返すか」。
+
+ {:iteration 3 :id :h10-unreadable-dir
+  :date "2026-09-15"
+  :observation "readdirSync が throw する dir が 1 つあると build が crash する (ENAMETOOLONG / EACCES)"
+  :fix "readdir を guard し :unreadable-dirs に数えて UNREADABLE-DIRS<TAB>n を印字。test は chmod 0 の dir で確認"
+  :after {:unreadable-dirs 1}
+  :verdict :landed}
+
+ {:iteration 3 :id :h11-walk-dirents
+  :date "2026-09-15"
+  :observation "walk が entry ごとに statSync + realpathSync (sys 37 s)"
+  :fix "readdirSync withFileTypes。statSync は symlink だけ、realpathSync は symlink か symlink 配下 (aliased) だけ"
+  :measured {:profile-walk-only-ms {:before 67229 :after 46097} :note "同一 tree、同一 process 内で連続実行、file 集合は同一 (59,165)"}
+  :verdict :landed}
+
+ {:iteration 3 :id :h12-scan-native-gm
+  :date "2026-09-15"
+  :observation "scan が SCI の per-line loop (split-lines + re-find × 全行)"
+  :fix "file 全文に gm の native RegExp。行番号は match index までの改行を indexOf で数える。indent は [ \\t]{1,3} (\\s だと空行を跨ぐ)"
+  :measured {:profile-5000-files-ms {:before 1712 :after 387}
+             :multi-line-metadata-defs-now-found 5018
+             :note "`(defonce ^{:doc \"…\"}\\n  *locale …)` のような複数行 metadata の def は per-line では取れなかった。ns 形式も同じ (ns 列の空が減る)"}
+  :verdict :landed}
+
+ {:iteration 3 :id :build-time-ab
+  :date "2026-09-15"
+  :method "root corpus で iter2 / iter3 の build を A B A B の順に交互実行、wall と loadavg を記録 (機械は他 session と共有、load が高い)"
+  :measured {:iter2-wall-s [134.1 149.2] :iter3-wall-s [107.7 121.1] :loadavg-1m-at-start [50.0 23.8 25.1 28.0] :order "A B A B" :ratio-per-round [0.80 0.81]}
+  :verdict :landed}]
