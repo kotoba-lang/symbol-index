@@ -380,4 +380,22 @@
    {:id :h31 :claim "subcommand 無しの dispatch で think 1 回と誤 subcommand の往復が消える" :proxy "test 4 件"}
    {:id :h32 :claim "編集直後の file でも行番号が合う (精度)" :proxy "test 5 件、stale 率 0.10%/1.6h"}]
   :stopped-because "出力形・鮮度・build の lever は着地済み。残る仮説は agent 側の実測が要る。捏造した仮説で tick を埋めない"
-  :verdict :measured-only}]
+  :verdict :measured-only}
+
+ ;; ---- iteration 14 (2026-09-15) — 定義の content hash (Unison 型の同一性) ----
+ ;; オーナー指示: kotoba の Unison 的性質 (CID / hash) を agent loop の効率に。観測は superproject の
+ ;; 90-docs/agent-efficiency/measurements.edn :k4-reread-waste (file 再読みの 75% は間に書き込みが無い、
+ ;; ≈17K tok / session)。
+
+ {:iteration 14 :id :h34-content-hash
+  :date "2026-09-15"
+  :fix "索引 v3: 7 列目に定義の content hash (span = この def から次の top-level def の直前まで、空白を 1 つに畳んで trim、sha256 先頭 10 hex)。outline / find / show に #hash を出す。写しの畳みは stem/line の推定をやめて hash (sym/kind/hash)。stale file の re-locate は同 hash を最優先し、note に『body unchanged / body changed → #new』を出す"
+  :measured {:root-corpus {:definitions 567719 :rows-sharing-a-hash 233858 :share 0.412 :groups 48876
+                           :top-duplicated-bodies [["exec-op" 1043] ["default-limit" 1017] ["now" 1001] ["rand-hex16" 1000] ["as-float" 1000]]}
+             :old-fold-heuristic {:rows-it-would-fold 222117 :groups-with-different-bodies 10322 :note "推定の畳みは 10,322 group で本文の違う定義を同一と扱っていた (K5 の欠陥)。hash で消えた"}
+             :full-build-wall-s {:v3 154.6 :loadavg 40.1 :note "hash の追加コストは別途 A/B していない (sha256 は native、span は subs)"}
+             :outline-chars-per-row "+13 (『  #』+10 hex)"}
+  :how-agents-use-it "変更の有無は cat でなく outline の hash 比較 (file の 1/5.7 の chars)。find の (+N identical) で写しを読まない。re-locate の『body unchanged』なら読み直さない"
+  :falsified-by "空白正規化を消したコピー → whitespace の check だけ赤 / 畳みの key に file を足したコピー → 畳み関連 5 check 赤"
+  :unmeasured-on-agent "実 session で cat の再読みが outline に置き換わるかは transcript で追う (scripts/agent-usage-report.cljk に『同一 path の再読み率』列を足すのが次)"
+  :verdict :landed}]
