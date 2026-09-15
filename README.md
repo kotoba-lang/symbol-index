@@ -10,13 +10,15 @@
 
 ```
 find <term>          # どこに在るか。hit ≤3 なら定義の冒頭まで出る (往復 1 回)
+find <ns>/<term> | --in <path> | --exact   # 多いときの絞り込み (出力が次の 1 手を示す)
 outline <file|ns>    # file を Read する前の地図: 定義の行番号一覧 (実測 18 倍軽い)
 show <ns/sym>        # 定義の前後 3 行。ns で曖昧性を解く
 ```
 
 exit code で判断する: **0 = hit / 1 = 測って 0 件 / 2 = 拒否** (理由は `REFUSE\t…` 行)。
 2 が出たら索引の問題 (top 違い・空・旧形式) —— `status` で素性を見て `build`。
-`find` が 40 件超なら term を長くする。`~` 付きは reader-cond / indent 内の nested 定義。
+`find` が 40 件超なら repo 別の件数表が出るので `--in <repo-path>` で絞る。0 件なら
+near の提案を引き直す (0 件は「無い」ではない)。`~` 付きは reader-cond / indent 内の nested 定義。
 
 ## 実測 (append-only、正本は `measurements.edn`)
 
@@ -91,6 +93,15 @@ build は I/O bound で、この機械の load 次第で 2 倍ぶれる。以後
 
 cache は `.kotoba-cache/symbol-index.cache.json`。同一 ms・同一 size の書き換えは
 見えないので、疑わしいときは `build --full`。
+
+### iteration 8 (2026-09-15) — 出力形で think を減らす
+
+| 仮説 | before | after |
+|---|---|---|
+| hit が多いとき | 40 行 + 「narrow the term」(`find walk`: 42 行 / 2,526 chars) | repo 別件数 top 12 + rank 上位 8 + narrow 3 形 (**24 行 / 1,018 chars**) |
+| 0 hit | 「0 hits」だけ (agent は『無い』と読む) | 断片 / prefix で近い symbol を最大 8 個提案。`--in` / ns の filter を守る |
+| `find` の絞り込み | 無し | `find <ns>/term` / `--in <path-substr>` / `--exact` |
+| prompt cache 向けの出力並び替え | — | 理屈で落ちるので不採用 (cache は会話 prefix 単位) |
 
 ## 使い方 (kbb / nbb / babashka どれでも)
 

@@ -263,4 +263,27 @@
   :fix "find は hit ≤3 なら全 hit の snippet を出す (iteration 2 は 1 hit のときだけ)。snippet は前 1 行 / 後 6 行 (定義の冒頭) に変更 (±3 では def 行の前 3 行が docstring でも本体でもない)"
   :expected {:tool-calls "2 → 1" :api-calls "3 → 2"}
   :verdict :landed-unmeasured-on-agent
-  :how-to-measure "hermes のある機で bench/hermes_ab.cljk D-preloaded-v7 <out> を回し、by-tool の 2 call 目が消えるか・correct 8/8 が保たれるかを見る (この機には hermes が無い)"}]
+  :how-to-measure "hermes のある機で bench/hermes_ab.cljk D-preloaded-v7 <out> を回し、by-tool の 2 call 目が消えるか・correct 8/8 が保たれるかを見る (この機には hermes が無い)"}
+
+ ;; ---- iteration 8 (2026-09-15) — agent の think / call を減らす出力形 ----
+
+ {:iteration 8 :id :h25-wide-hits-summary
+  :date "2026-09-15"
+  :observation "hit が 40 超のとき 40 行を垂れ流して『narrow the term』とだけ言う。agent は 40 行を読んでも次の 1 手 (どの repo か) が決まらない"
+  :fix "repo (path 先頭 3 段) ごとの件数表 (top 12) + rank 上位 8 行 + narrow の 3 形 (--in <path> / --exact / <ns>/term)。--in と --exact と ns/term を find に足した"
+  :measured {:find-walk-root-corpus {:before {:lines 42 :chars 2526} :after {:lines 24 :chars 1018} :hits 559 :repos 268}}
+  :verdict :landed}
+
+ {:iteration 8 :id :h26-zero-hits-near
+  :date "2026-09-15"
+  :observation "Hermes baseline の誤答 4/4 は『定義は存在しない』型の false negative (:h18)。find の 0 hit は agent に『無い』と読まれる"
+  :fix "0 hit のとき term を -_./ で割った断片 (と 5 文字 prefix) で引き、近い symbol を最大 8 個示す。--in / ns の filter は提案にも効く (filter 外の symbol を漏らさない)"
+  :measured {:verify-heartbeat-x "near: verify-node-health verify! verify-current-hash … (8)" :snippetz "near: snippet"}
+  :falsified-by "提案を消したコピー → その check だけ赤 / filter を外したコピー → --in の check だけ赤"
+  :verdict :landed}
+
+ {:iteration 8 :id :h27-prompt-cache-prefix
+  :date "2026-09-15"
+  :hypothesis "find の出力の可変部 (indexed N symbols) を末尾に移すと prompt cache hit が上がる"
+  :verdict :rejected-without-measuring
+  :reason "cache は会話 prefix 単位。tool 出力は会話の末尾に足されるので、出力内の並びは prefix の安定性に効かない。効くのは skill 本文と system prompt の安定で、それは既に安定 (:h18 の +1.7k tok は cached)。測る前に理屈で落ちるので測っていない"}]

@@ -497,27 +497,77 @@
                             (range from to))))
       (catch :default _ "  (unreadable)"))))
 
+(defn- repo-of
+  "hit の repo 相当 (path の先頭 3 段、`orgs/<org>/<repo>`; 浅い path はそのまま)。"
+  [file]
+  (let [segs (str/split file #"/")]
+    (if (>= (count segs) 4)
+      (str/join "/" (take 3 segs))
+      (str/join "/" (butlast segs)))))
+
+(defn- suggest-near
+  "0 hit のときの近傍: term を - / _ / . で割った 4 文字以上の断片ごとに substring で
+  引き、symbol 名を最大 8 個返す。Hermes A/B の baseline 誤答は 4/4 が『定義は存在
+  しない』型の false negative だった — 0 hit を『無い』と読ませない。"
+  [text term keep?]
+  (let [parts (->> (str/split term #"[-_./]")
+                   (mapcat (fn [p] [p (when (> (count p) 5) (subs p 0 5))]))
+                   (remove nil?) (filter #(>= (count %) 4)) distinct)
+        near (->> parts
+                  (mapcat #(scan-rows text (str "[^\\t\\n]*" (escape-re %) "[^\\t\\n]*") "i"))
+                  (filter keep?)
+                  (map :sym) distinct (take 8))]
+    (when (seq near)
+      (println (str "  near (by fragment " (str/join "," parts) "): " (str/join " " near)))
+      (println "  → find <one of them>   (0 hits is not 'undefined'; symbols may be spelled differently)"))))
+
 (defn- cmd-find
-  [terms]
+  "term [term...] [--in <path-substr>] [--exact]。term が `ns/sym` なら leaf で引いて ns 列で絞る。
+  hit が find-limit を超えたら substring hit を垂れ流さず、exact/prefix hit + repo ごとの
+  件数表を出して次の 1 手 (--in / --exact) を示す (iteration 8)。"
+  [args]
   (let [{:keys [header text error]} (load-index-text)]
     (if error
       (refuse error)
-      (let [hits (distinct (mapcat #(scan-rows text (str "[^\\t\\n]*" (escape-re %) "[^\\t\\n]*") "i") terms))
-            term0 (str/lower-case (first terms))
-            ranked (sort-by #(rank-key term0 %) hits)]
-        (println (str "indexed " (:symbols header) " symbols, " (count hits) " hits for "
-                      (str/join " " terms)))
+      (let [in-idx (.indexOf (to-array args) "--in")
+            in-filter (when (and (>= in-idx 0) (< (inc in-idx) (count args))) (nth args (inc in-idx)))
+            exact? (some #{"--exact"} args)
+            terms (->> args (remove #{"--exact"}) (remove #{"--in"}) (remove #{in-filter}))
+            split-ns (fn [t] (let [i (.lastIndexOf t "/")] (if (pos? i) [(subs t 0 i) (subs t (inc i))] [nil t])))
+            leafs (map (comp second split-ns) terms)
+            nss (keep (comp first split-ns) terms)
+            keep? (fn [h] (and (or (empty? nss) (some (fn [n] (= n (:ns h))) nss))
+                               (or (nil? in-filter) (str/includes? (:file h) in-filter))))
+            hits (->> leafs
+                      (mapcat #(scan-rows text (if exact? (escape-re %) (str "[^\\t\\n]*" (escape-re %) "[^\\t\\n]*")) "i"))
+                      distinct
+                      (filter keep?))
+            term0 (str/lower-case (first leafs))
+            ranked (sort-by #(rank-key term0 %) hits)
+            n (count hits)]
+        (println (str "indexed " (:symbols header) " symbols, " n " hits for " (str/join " " terms)
+                      (when in-filter (str " --in " in-filter)) (when exact? " --exact")))
         (age-warning header)
-        (doseq [h (take find-limit ranked)]
-          (println (fmt-hit h)))
-        (when (> (count hits) find-limit)
-          (println (str "  ... " (- (count hits) find-limit) " more (narrow the term)")))
+        (if (<= n find-limit)
+          (doseq [h ranked] (println (fmt-hit h)))
+          (let [n-exact (count (filter #(zero? (first (rank-key term0 %))) ranked))
+                repos (map (comp repo-of :file) hits)
+                by-repo (->> repos frequencies (sort-by (comp - val)) (take 12))]
+            (println (str "  too many to list: " n-exact " exact, " (- n n-exact) " substring, in "
+                          (count (distinct repos)) " repos. Top repos:"))
+            (doseq [[r c] by-repo] (println (str "  " c "\t" r)))
+            (println "  first 8 by rank:")
+            (doseq [h (take 8 ranked)] (println (fmt-hit h)))
+            (println (str "  narrow: find " (first leafs) " --in <repo-path>"
+                          (when-not exact? (str "  |  find " (first leafs) " --exact"))
+                          "  |  find <ns>/" (first leafs)))))
         ;; hit が 3 件以下なら show を待たずに全部の snippet を出す (round trip を 1 つ減らす。
         ;; iteration 2 は 1 件のときだけだった; Hermes A/B では全 query が 2 call だった)
-        (when (<= 1 (count hits) 3)
+        (when (<= 1 n 3)
           (doseq [{:keys [file line sym kind]} ranked]
-            (when (> (count hits) 1) (println (str "== " kind " " sym " — " file ":" line)))
+            (when (> n 1) (println (str "== " kind " " sym " — " file ":" line)))
             (println (snippet file line))))
+        (when (zero? n) (suggest-near text (first leafs) keep?))
         (if (seq hits) 0 1)))))
 
 (defn- cmd-show
@@ -617,7 +667,7 @@
 (defn- usage []
   (println "usage: kbb --backend sci scripts/symbol-index.cljk build|find|show|outline|status [args]")
   (println "  build [--include-worktrees] [--no-prune] [--full] — scan .cljk/.cljc/.cljs/.clj/.kotoba and write the index")
-  (println "  find <term> [term...] — case-insensitive substring search over symbol names (exit 1 = 0 hits)")
+  (println "  find <term|ns/term> [term...] [--in <path-substr>] [--exact] — symbol name search (exit 1 = 0 hits)")
   (println "  show <symbol|ns/symbol> — definition snippet (file:line + context lines)")
   (println "  outline <file-suffix|ns> — every definition in a file/namespace, in line order (map before Read)")
   (println "  status — index header (top / built-at / scanned / symbols) and age")
