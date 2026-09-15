@@ -34,13 +34,33 @@
 (def fs (js/require "node:fs"))
 (def path (js/require "node:path"))
 
-(def top
-  (or (.-CLAUDE_PROJECT_DIR (.-env js/process))
-      (.cwd js/process)))
-
 (def index-dir ".kotoba-cache")
 (def index-file "symbol-index.tsv")
 (def index-version "v2")
+
+(defn- nearest-indexed-ancestor
+  "cwd から上へ辿って .kotoba-cache/symbol-index.tsv を持つ最初の dir。無ければ nil。
+  agent の shell は project root に居ないことが多い (Hermes Agent の terminal は
+  $HOME で始まる実測、2026-09-15) ので、cwd 決め打ちにしない。"
+  [start]
+  (loop [d start]
+    (if (.existsSync fs (.join path d index-dir index-file))
+      d
+      (let [up (.dirname path d)]
+        (if (= up d) nil (recur up))))))
+
+(def top
+  "索引の root。優先順: SYMBOL_INDEX_ROOT > CLAUDE_PROJECT_DIR > 索引を持つ最寄りの
+  祖先 dir > cwd。cwd に落ちるのは build のときだけ意味がある (find/show は索引が
+  無ければ拒否する —— 以前は $HOME で呼ばれて home 全体を走査し、Hermes の terminal
+  tool の 120s timeout に当たった)。"
+  (let [chosen (or (not-empty (.-SYMBOL_INDEX_ROOT (.-env js/process)))
+                   (not-empty (.-CLAUDE_PROJECT_DIR (.-env js/process)))
+                   (nearest-indexed-ancestor (.cwd js/process))
+                   (.cwd js/process))]
+    ;; header の top と文字列比較するので realpath に揃える (macOS の /var → /private/var、
+    ;; env で symlink 側の path を渡された場合に top 不一致で拒否していた実測)。
+    (try (.realpathSync fs chosen) (catch :default _ chosen))))
 
 (def ^:private scan-exts #{".cljk" ".cljc" ".cljs" ".clj" ".kotoba"})
 (def ^:private skip-dirs #{".git" "node_modules" ".west" "target" ".cpcache" ".lsp" ".clj-kondo"
@@ -246,15 +266,14 @@
           0))))
 
 (defn- load-index-text
-  "索引の本文 (TSV 全文) と header を返す。無ければ build してから読む。
-  top 不一致 / 空 / 旧形式は {:error …} を返す (呼び側が refuse する)。"
+  "索引の本文 (TSV 全文) と header を返す。無い / top 不一致 / 空 / 旧形式は
+  {:error …} を返す (呼び側が refuse する)。**無くても build を代行しない** ——
+  top が $HOME に落ちた状態で呼ばれると home 全体を走査して timeout する
+  (Hermes Agent で実測)。build は明示の `build` だけ。"
   []
   (let [p (index-path)]
-    (when-not (.existsSync fs p)
-      (println "index not found — building first...")
-      (do-build {}))
     (if-not (.existsSync fs p)
-      {:error (str "no index at " p)}
+      {:error (str "no index at " p " — run `symbol-index build` at the project root (or set SYMBOL_INDEX_ROOT)")}
       (let [text (.readFileSync fs p "utf8")
             h (parse-header text)]
         (cond

@@ -40,12 +40,16 @@
       :else ["kbb" "--backend" "sci"])))
 
 (defn run
-  "script を top で走らせ {:code :out} を返す。"
+  "script を top で走らせ {:code :out} を返す。第 1 引数が map なら
+  {:env {\"K\" \"V\"}} で環境変数を足す (SYMBOL_INDEX_ROOT の check 用)。"
   [top & args]
-  (let [[bin & pre] runner
+  (let [[opts args] (if (map? (first args)) [(first args) (rest args)] [{} args])
+        [bin & pre] runner
         ;; process.env は plain object ではないので js->clj が素通しする — copy して消す
         env (js/Object.assign #js{} (.-env js/process))
         _ (js-delete env "CLAUDE_PROJECT_DIR")
+        _ (js-delete env "SYMBOL_INDEX_ROOT")
+        _ (doseq [[k v] (:env opts)] (aset env k v))
         r (.spawnSync cp bin (clj->js (concat pre [script] args))
                       #js{:cwd top :encoding "utf8" :env env})]
     {:code (.-status r) :out (str (.-stdout r) (.-stderr r))}))
@@ -209,6 +213,31 @@
     (let [{:keys [code out]} (run b "status")]
       (check! "status also refuses on top mismatch" (= 2 code) out))))
 
+(defn test-no-index-and-root-discovery
+  "iteration 3 (Hermes Agent 導入で実測): agent の shell は $HOME に居るので
+  cwd 決め打ちだと find が home 全体を build しに行って timeout する。
+    * 索引が無い top で find → REFUSE exit 2、**索引を作らない** (build を代行しない)
+    * 索引を持つ root の subdir から find → 上に辿って root の索引を引く
+    * 無関係な cwd でも SYMBOL_INDEX_ROOT があればそこを引く"
+  []
+  (let [root (mk-tmp "root") elsewhere (mk-tmp "elsewhere")]
+    (write! root "src/r/core.cljk" "(ns r.core)\n(defn root-only-fn [] 1)\n")
+    (write! root "src/r/deep/leaf.cljk" "(ns r.deep.leaf)\n")
+    (write! elsewhere "y.cljk" "(defn elsewhere-fn [] 1)\n")
+    (let [{:keys [code out]} (run elsewhere "find" "elsewhere-fn")]
+      (check! "Q2: find with no index REFUSE exit 2 (does not auto-build)"
+              (and (= 2 code) (re-find #"(?m)^REFUSE\tno index at .* — run `symbol-index build`" out)) out)
+      (check! "Q2: find with no index leaves no index behind"
+              (not (.existsSync fs (.join path elsewhere ".kotoba-cache" "symbol-index.tsv"))) ""))
+    (run root "build")
+    (let [sub (.join path root "src" "r" "deep")
+          {:keys [code out]} (run sub "find" "root-only-fn")]
+      (check! "subdir cwd walks up to the root index"
+              (and (= 0 code) (re-find #"1 hits for root-only-fn" out)) out))
+    (let [{:keys [code out]} (run elsewhere {:env {"SYMBOL_INDEX_ROOT" root}} "find" "root-only-fn")]
+      (check! "SYMBOL_INDEX_ROOT overrides an unrelated cwd"
+              (and (= 0 code) (re-find #"1 hits for root-only-fn" out)) out))))
+
 (defn test-stale-json []
   (let [top (mk-tmp "json")]
     (write! top "x.cljk" "(defn foo [] 1)\n")
@@ -230,6 +259,7 @@
   (test-build-and-find top git?)
   (test-empty-tree)
   (test-wrong-top)
+  (test-no-index-and-root-discovery)
   (test-stale-json))
 
 (println (str "CHECKS\t" @checks))
