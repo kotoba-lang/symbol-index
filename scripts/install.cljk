@@ -37,8 +37,10 @@
 (defn- problem! [m] (vswap! problems conj m) (say "PROBLEM\t" m))
 
 ;; ---- bin symlink
-(let [exists (.existsSync fs bin-link)
-      lstat (when exists (.lstatSync fs bin-link))
+(let [;; existsSync は symlink を辿るので、指先が消えた (worktree を retire した) link を
+      ;; 「無い」と言う → symlinkSync が EEXIST で落ちた (実測)。lstat で link 自体を見る
+      lstat (try (.lstatSync fs bin-link) (catch :default _ nil))
+      exists (some? lstat)
       current (when (and lstat (.isSymbolicLink lstat)) (.readlinkSync fs bin-link))]
   (cond
     (and current (= (.resolve path (.dirname path bin-link) current) bin-target))
