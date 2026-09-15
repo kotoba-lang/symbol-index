@@ -289,6 +289,29 @@
             (and (= 1 code) (re-find #"interpreted as: find bogus" out)) out))
   (let [{:keys [code out]} (run top "--bogus")]
     (check! "unknown flag exit 2 with usage" (and (= 2 code) (re-find #"usage:" out)) out))
+  ;; iteration 12: 索引より新しい file は、その file だけ再走査して行を直す
+  ;; (fixture を書き換えるので、この節は build 系 check の後に置く)
+  (let [f (.join path top "orgs" "b" "src" "b" "core.cljc")
+        _ (.writeFileSync fs f (str ";; two lines\n;; inserted\n" (.readFileSync fs f "utf8")) "utf8")
+        {:keys [code out]} (run top "find" "b.core/same-name")]
+    (check! "stale file: find re-locates the line and says so"
+            (and (= 0 code) (re-find #"(?m)^  \(re-located: file changed after index, was line 2\)$" out)
+                 (re-find #"(?m)^  4\| \(defn same-name \[\] :b\)" out)) out))
+  (let [{:keys [code out]} (run top "show" "b.core/same-name")]
+    (check! "stale file: show re-locates too"
+            (and (= 0 code) (re-find #"core.cljc:4$" (first (filter #(str/starts-with? % "== defn b.core/same-name") (str/split-lines out))))
+                 (re-find #"(?m)^  4\| \(defn same-name" out)) out))
+  (let [{:keys [code out]} (run top "outline" "b/core.cljc" "--bare")]
+    (check! "stale file: outline re-scans the file"
+            (and (= 0 code) (re-find #"(?m)^  \(re-scanned: file changed after index\)$" out)
+                 (re-find #"(?m)^  3\tns b.core\n  4\tdefn same-name$" out)) out))
+  (let [{:keys [code out]} (run top "find" "hidden-fn")]
+    (check! "fresh file: no relocation note" (and (= 0 code) (not (re-find #"re-located|re-scanned" out))) out))
+  (let [f (.join path top "orgs" "b" "src" "b" "core.cljc")
+        _ (.writeFileSync fs f "(ns b.core)\n" "utf8")
+        {:keys [code out]} (run top "show" "b.core/same-name")]
+    (check! "stale file that lost the symbol: says so instead of showing a wrong snippet"
+            (and (= 0 code) (re-find #"no longer defines this symbol — build\)\n== " out)) out))
   (let [{:keys [code out]} (run top "build" "--include-worktrees")]
     (check! "--include-worktrees keeps the worktree"
             (and (= 0 code) (re-find #"(?m)^SKIPPED-WORKTREES\t0$" out)) out)))

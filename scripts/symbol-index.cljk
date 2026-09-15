@@ -482,6 +482,38 @@
   (str "  " (if nested "~" "") kind " " sym " — " file ":" line
        (when (and copies (pos? copies)) (str "  (+" copies " copies)"))))
 
+(defn- built-ms [header]
+  (try (.getTime (js/Date. (:built-at header))) (catch :default _ 0)))
+
+(defn- stale-file?
+  "file が索引の build より後に書かれたか (mtime > built-at)。stat できなければ false。"
+  [file built]
+  (try (> (.-mtimeMs (.statSync fs (.join path top file))) built) (catch :default _ false)))
+
+(defn- fresh-rows
+  "file を今読んで scan-file した行 (parse 済み)。読めなければ nil。"
+  [file]
+  (try (mapv parse-row (scan-file (.join path top file) file)) (catch :default _ nil)))
+
+(defn- relocate
+  "iteration 12: 索引より新しい file の hit は、その file だけ再走査して行番号を直す
+  (rebuild 無しで精度を保つ。1.6 h の索引で変更済み file は 0.10% だが、agent が
+  今編集している file こそ次に引く file)。同 sym/kind の行のうち旧行に最も近いものを
+  採る。返り値は hit に :relocated-from (旧行) か :gone true を足したもの。"
+  [{:keys [file sym kind line] :as hit} built]
+  (if-not (stale-file? file built)
+    hit
+    (let [cands (filter #(and (= sym (:sym %)) (= kind (:kind %))) (or (fresh-rows file) []))]
+      (if (empty? cands)
+        (assoc hit :gone true)
+        (let [best (apply min-key #(js/Math.abs (- (:line %) line)) cands)]
+          (if (= (:line best) line) hit (assoc hit :line (:line best) :relocated-from line)))))))
+
+(defn- relocation-note [{:keys [relocated-from gone]}]
+  (cond gone "  (file changed after index and no longer defines this symbol — build)"
+        relocated-from (str "  (re-located: file changed after index, was line " relocated-from ")")
+        :else nil))
+
 (defn- snippet
   "file の line の 1 行前から、定義の冒頭 after 行 (既定 6) を返す。iteration 7 で
   前後対称 (±3) から前 1 / 後 6 に変えた: agent の問いは「定義の冒頭を見せて」で、
@@ -578,10 +610,13 @@
         ;; show をもう 1 回呼ぶ形が one_call bench で 3/8 あった
         (let [pick (cond (<= 1 (count exact) 3) exact
                          (<= 1 n 3) ranked
-                         :else nil)]
-          (doseq [{:keys [file line sym kind]} pick]
-            (when (> n 1) (println (str "== " kind " " sym " — " file ":" line)))
-            (println (snippet file line))))
+                         :else nil)
+              built (built-ms header)]
+          (doseq [h pick]
+            (let [{:keys [file line sym kind gone] :as h} (relocate h built)]
+              (when (> n 1) (println (str "== " kind " " sym " — " file ":" line)))
+              (when-let [note (relocation-note h)] (println note))
+              (when-not gone (println (snippet file line))))))
         (when (zero? n) (suggest-near text (first leafs) keep?))
         (if (seq hits) 0 1)))))
 
@@ -589,7 +624,7 @@
   "`sym` / `ns/sym` / `sym:line` を受ける。ns が付いていれば ns 列で絞り、絞って
   0 件なら leaf だけで引き直す (その旨を印字)。"
   [target]
-  (let [{:keys [text error]} (load-index-text)]
+  (let [{:keys [header text error]} (load-index-text)]
     (if error
       (refuse error)
       (let [[sym-part] (str/split target #":")
@@ -606,9 +641,11 @@
         (if (empty? hits)
           (refuse "no exact match for " target " — try: find " leaf)
           (do
-            (doseq [{:keys [file line sym kind ns]} (take 3 hits)]
-              (println (str "== " kind " " (if (seq ns) (str ns "/") "") sym " — " file ":" line))
-              (println (snippet file line)))
+            (doseq [h (take 3 hits)]
+              (let [{:keys [file line sym kind ns gone] :as h} (relocate h (built-ms header))]
+                (println (str "== " kind " " (if (seq ns) (str ns "/") "") sym " — " file ":" line))
+                (when-let [note (relocation-note h)] (println note))
+                (when-not gone (println (snippet file line)))))
             (when (> (count hits) 3)
               (println (str "  ... " (- (count hits) 3) " more definitions of " leaf " (qualify with ns/)")))
             0))))))
@@ -656,9 +693,12 @@
             (age-warning header)
             (doseq [f (take 5 files)]
               (println (str "== " f))
-              (let [lines (when-not (:bare opts)
+              (let [stale? (stale-file? f (built-ms header))
+                    frows (when stale? (fresh-rows f))
+                    _ (when frows (println "  (re-scanned: file changed after index)"))
+                    lines (when-not (:bare opts)
                             (try (str/split-lines (.readFileSync fs (.join path top f) "utf8")) (catch :default _ nil)))]
-                (doseq [{:keys [line kind sym nested]} (sort-by :line (filter #(= f (:file %)) rows))]
+                (doseq [{:keys [line kind sym nested]} (sort-by :line (or frows (filter #(= f (:file %)) rows)))]
                   (let [sig (when lines (signature lines line sym))]
                     (println (str "  " line "\t" (if nested "~" "") kind " " sym
                                   (when (seq sig) (str "  · " sig))))))))

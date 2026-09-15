@@ -332,4 +332,15 @@
   :fix "subcommand 無しの引数を形で dispatch: *.cljk 等 → outline / a.b → outline (ns) / a.b/c → show / それ以外 → find。解釈を 1 行目に印字。未知の bare word は usage error でなく find (0 hit → exit 1)、未知の flag だけ exit 2"
   :expected "skill 本文の使い分け説明を 1 行に縮められる (call あたりの cached prefix が減る) / 誤った subcommand による往復が消える"
   :verdict :landed-unmeasured-on-agent
-  :note "測れるのは output の同値性 (test 4 件) まで。agent 側の think / tok は hermes のある機で"}]
+  :note "測れるのは output の同値性 (test 4 件) まで。agent 側の think / tok は hermes のある機で"}
+
+ ;; ---- iteration 12 (2026-09-15, /loop tick 3) ----
+
+ {:iteration 12 :id :h32-relocate-stale-hits
+  :date "2026-09-15"
+  :observation "root corpus、build 1.6 h 後: 索引 47,353 file のうち build 後に変更 49 (0.10%)。少ないが、agent が今編集している file こそ次に引く file なので、ずれた行番号と別行の snippet を返す確率は query 側で偏る"
+  :fix "find / show / outline は hit の file の mtime > built-at なら、その file だけ scan-file し直して同 sym/kind の最寄り行に直し『re-located: … was line N』を印字。symbol が消えていれば snippet を出さず『no longer defines — build』。outline は file 丸ごと re-scan (『re-scanned』)。rebuild は要らない"
+  :cost "stale な hit 1 件につき file 1 回の read + regex (snippet のためにどうせ読む)"
+  :falsified-by "relocate を無効化したコピー → stale の check 3 件だけ赤"
+  :one-call-bench {:correct "8/8" :opening "8/8" :chars-mean 1147 :note "変化なし (fresh な索引)"}
+  :verdict :landed}]
