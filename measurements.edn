@@ -122,4 +122,44 @@
   :date "2026-09-15"
   :method "root corpus で iter2 / iter3 の build を A B A B の順に交互実行、wall と loadavg を記録 (機械は他 session と共有、load が高い)"
   :measured {:iter2-wall-s [134.1 149.2] :iter3-wall-s [107.7 121.1] :loadavg-1m-at-start [50.0 23.8 25.1 28.0] :order "A B A B" :ratio-per-round [0.80 0.81]}
+  :verdict :landed}
+
+ ;; ---- iteration 4 (2026-09-15) ----
+ ;; 観測: walk の dir 数を depth-3 prefix で集計 (scratch profile、BFS)。136,302 dir のうち
+ ;; source file を 1 つも持たない group の dir が 116,269 (85%)。上位は personal/takeout
+ ;; 25,244 / app-news/resources 12,691 ×2 / m365-archive/onedrive 7,346 / toshokan/fulltext
+ ;; 3,841 / .venv 2,391。名前では分けられない (data の export、archive、news content)。
+
+ {:iteration 4 :id :h13-prune-fileless-subtrees
+  :date "2026-09-15"
+  :hypothesis "「連続して source を持たない dir の数」だけで data subtree を切れる"
+  :calibration {:group-rule "repo 内は repo + 直下 2 段、repo 外は top から 4 段"
+                :longest-fileless-run-in-groups-with-source 737
+                :longest-run-holder "orgs/etzhayyim/root/50-infra/etzhayyim-did-web"
+                :rejected-group-rule {:rule "repo + 1 段" :longest-run 1362 :holder "50-infra" :would-lose-files 86}
+                :budget-table {100 {:prunable-dirs 73916 :file-groups-hit 3}
+                               200 {:prunable-dirs 70860 :file-groups-hit 1}
+                               400 {:prunable-dirs 67499 :file-groups-hit 1}
+                               800 {:prunable-dirs 62447 :file-groups-hit 0}}
+                :chosen 1000 :margin "737 に対して 36%"}
+  :fix "BFS で group ごとに連続 fileless dir を数え、budget で group の残りを歩かない。pruned-groups を header と status に載せる。build --no-prune で無効"
+  :ab {:order "noprune prune noprune prune"
+       :wall-s {:noprune [200.5 179.4] :prune [161.9 132.4]}
+       :loadavg-1m-at-start [99.2 68.7 36.7 33.3]
+       :scanned {:noprune 51582 :prune 51582}
+       :rows-identical true
+       :pruned-groups 11}
+  :verdict :landed}
+
+ {:iteration 4 :id :h14-walk-was-dfs
+  :date "2026-09-15"
+  :observation "iteration 2-3 の walk は (vswap! next-dirs conj …) を (rest dirs) = seq に対して行っていたので先頭に積まれ、実質 DFS だった。prune の budget を BFS で校正したのに DFS で走らせると test で late file が拾われた (再現: 1,050 個の空 dir の 1 段下に source)"
+  :fix "next-dirs を vec にして末尾に積む (BFS)"
+  :verdict :landed}
+
+ {:iteration 4 :id :h15-venv
+  :date "2026-09-15"
+  :observation ".venv 系が 2,391 + 385 dir"
+  :fix "pyvenv.cfg を持つ dir は歩かない (itonami-maturity-scan と同じ、名前でなく標準ファイル)"
+  :after {:skipped-venvs 8}
   :verdict :landed}]
