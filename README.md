@@ -76,7 +76,7 @@ phase 内訳 (prune 後 74,419 dir、load 54): **walk 121.7 s** / scan 40.3 s / 
 
 | 仮説 | 結果 |
 |---|---|
-| `org-ieee-find` (amu native) を walk に使う | **今は不可**: 式 (`-prune`) が無い、arena が reclaim せず上限 (pairs 4,194,304 / string-pool 256 MB) で ~3 万 entry で SIGILL、同じ set で `/usr/bin/find` の 5–6 倍遅い (8,719 entry: 0.67 s vs 0.12 s)。再評価条件は arena reclaim か `-prune` 相当 |
+| `org-ieee-find` (amu native) を walk に使う | **今は不可、理由は 1 つに減った** (2026-09-15 再評価、iteration 13): 式 (`-prune`) が無い。arena の trap と速度は消えた — 857,322 entry を 1 thread で user 1.64 / sys 18.5 s (`/usr/bin/find -s` 1.41 / 36.5、`fd -HI` 1.90 / 22.7、wall は 49 / 76 / 7.4 s)。再評価条件は `-prune` 相当が入ったとき。正本 root ADR-2609152113 |
 | `/usr/bin/find -L` を fast path に | **不採用**: load 90–130 の共有機では I/O bound。全 tree の find 93.7 / 88.0 s ≒ prune 後の SCI walk 131.5 / 95.2 s。SCI overhead は上限でも 3 割 |
 | 子 dir ごとの `.git` statSync (74K 回) を dirent 判定に | A B A B: 156.7 / 172.0 s → **141.2 / 150.7 s** (−10% / −12%) |
 

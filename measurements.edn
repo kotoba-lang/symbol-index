@@ -343,4 +343,21 @@
   :cost "stale な hit 1 件につき file 1 回の read + regex (snippet のためにどうせ読む)"
   :falsified-by "relocate を無効化したコピー → stale の check 3 件だけ赤"
   :one-call-bench {:correct "8/8" :opening "8/8" :chars-mean 1147 :note "変化なし (fresh な索引)"}
-  :verdict :landed}]
+  :verdict :landed}
+ ;; ---- iteration 13 (2026-09-15, owner-directed: kotoba find / grep toward the fastest) ----
+ ;; :h19 の再評価条件 (arena reclaim か -prune 相当) のうち arena 側が動いた。
+ ;; 着地先は org-ieee-find / org-ieee-grep / amu / kotoba-native / kotoba-verifier /
+ ;; kotoba-gmir / kotoba-mir / artifact、正本は root ADR-2609152113。
+
+ {:iteration 13 :id :h33-kotoba-find-reevaluated
+  :date "2026-09-15"
+  :question "オーナー指示: org-ieee-find / org-ieee-grep を fd / ripgrep を参考に最速へ。:h19 の『今は不可』の 3 理由 (式が無い / arena 上限で ~3 万 entry で trap / 同じ set で 5-6 倍遅い) のうち何が動いたか"
+  :changed {:org-ieee-find "listing 1 pass、zero-copy view、その場で降りる、entry あたり 4 handle、順序は LC_ALL=C find -s と byte 同一"
+            :amu-loader "wire 37 を 64 KiB buffer、RLIMIT_CPU / alarm を budget (--cpu-seconds / --wall-seconds)、pair 64 Mi / pool 1 GiB ceiling、browse の 4,096 entry literal 撤去、context ABI v5 (string-index-of = host slot 216, memmem)"
+            :org-ieee-grep "残り text 全体への 1 search で次の match へ、行頭は後方倍々 window"}
+  :measured {:app-news {:entries 34803 :kotoba-find {:user 0.07 :sys 0.49} :usr-bin-find {:user 0.05 :sys 1.4} :set-identical true :sequence-identical-find-s true}
+             :kotoba-lang {:entries 857322 :kotoba-find {:user 1.64 :sys 18.5 :wall 49} :usr-bin-find-s {:user 1.41 :sys 36.5 :wall 76} :fd-HI {:user 1.90 :sys 22.7 :wall 7.4} :loadavg "60-145"}
+             :grep-33MB {:absent {:kotoba 0.13 :grep-F 0.15 :rg-F 0.00} :matches-26400 {:kotoba 0.17 :grep-F 0.17} :matches-598400 {:kotoba 0.47 :grep-F 0.16 :rg-F 0.06}}
+             :host-search-in-find "scan-to を host search に替えた版: 857K entry で user 1.56 → 1.60 s、差なし (名前が短い)。着地せず"}
+  :verdict :partially-cleared
+  :reason "trap と速度の 2 理由は消えた: root corpus 規模 (857K entry) を 1 thread で /usr/bin/find の半分の CPU で歩く。残る理由は式 (-prune / -name) が無いこと。walk の wall (49 s vs SCI walk 121 s、ただし別日・別 load) は 1 thread の I/O 直列化で、fd の 7.4 s は並列 walk の分。symbol-index が find を採るには (1) -prune 相当 (2) 出力の parse cost の実測 が要る。再評価条件を『-prune 相当が入ったとき』に更新"}]
