@@ -125,6 +125,26 @@
       ;; (git 不在 / exit 128) は「測れなかった」なので checked false。
       (catch :default e {:names #{} :checked (= 1 (.-status e))}))))
 
+(def ^:private prune-budget
+  "group (repo 直下 2 段、repo 外は top から 4 段) の中で **連続して** source file を
+  1 つも持たない dir がこの数に達したら、その group の残りを歩かない。
+  iteration 4 の実測 (root corpus、136,302 dir): source を持つ group の最長 fileless
+  run は 737 (`etzhayyim/root/50-infra/etzhayyim-did-web`)、fileless な group の dir
+  は 116,269。budget 800 で誤爆 0 / 62,447 dir を prune、1000 は余裕 36%。
+  prune した group は header の pruned-groups と `status` に必ず載る (黙って
+  消さない)。`build --no-prune` で無効。"
+  1000)
+
+(defn- group-of
+  "prune の集計単位。repo (`.git` を持つ最寄りの祖先) の中なら repo path + 直下 2 段、
+  repo の外なら top 相対 4 段。1 段だと `50-infra` (1,362 run の後に 86 file) を
+  誤爆し、2 段なら誤爆 0 だった (measurements.edn :h13)。"
+  [rel repo]
+  (if repo
+    (let [segs (remove str/blank? (str/split (subs rel (count repo)) #"/"))]
+      (if (seq segs) (str repo "/" (str/join "/" (take 2 segs))) repo))
+    (str/join "/" (take 4 (str/split rel #"/")))))
+
 (defn- walk
   "dir 配下の走査対象 file を返す。west の子 repo は symlink checkout なので
   symlink の **指先** を辿る。visited set (realpath) で symlink loop を断つ。
@@ -139,53 +159,78 @@
   だけ呼ぶ (同一 tree で 67 s → 46 s)。⚠ Node Stats / Dirent の isFile 等は
   method — (.-isFile e) は関数が返るだけで真偽にならない。読めない dir
   (EACCES / ENAMETOOLONG、実測: 名前が shell script 全文の dir が在った) は
-  落とさず :unreadable-dirs に数える。返り値は {:files [...] :stats {...}}。"
+  落とさず :unreadable-dirs に数える。
+
+  iteration 4: dir の 76% (105K/136K) は source を 1 つも持たない subtree
+  (takeout / news resources / onedrive archive / .venv) だった。名前でなく
+  「連続 fileless dir 数」で prune し (prune-budget)、`pyvenv.cfg` を持つ dir は
+  virtualenv として歩かない。返り値は {:files [...] :stats {...}}。"
   [dir opts]
   (let [out (volatile! [])
         seen-files (volatile! #{})
         visited (volatile! #{})
         {ignored :names checked :checked} (gitignored-children)
-        stats (volatile! {:dirs 0 :unreadable-dirs 0 :skipped-worktrees 0
+        budget (if (:no-prune opts) js/Infinity prune-budget)
+        runs (volatile! {})            ; group -> 連続 fileless dir 数
+        pruned (volatile! #{})         ; 打ち切った group
+        stats (volatile! {:dirs 0 :unreadable-dirs 0 :skipped-worktrees 0 :skipped-venvs 0
                           :skipped-gitignored (count ignored)
                           :gitignore-checked checked})
         realpath (fn [p] (try (.realpathSync fs p) (catch :default _ p)))]
-    ;; queue entry = [path realpath]; aliased? = path と realpath が違う (symlink 配下)
-    (loop [dirs [[dir (realpath dir)]]]
-      (if-let [[d dreal] (first dirs)]
-        (let [next-dirs (volatile! (rest dirs))
+    ;; queue entry = [path realpath repo]; repo = 最寄りの祖先 repo の top 相対 path
+    (loop [dirs [[dir (realpath dir) nil]]]
+      (if-let [[d dreal repo] (first dirs)]
+        (let [;; ⚠ (rest dirs) は seq なので conj は先頭に積む = DFS になる (iteration 2-3
+              ;; はそうなっていた)。prune の budget は BFS で校正したので vec にして末尾に積む。
+              next-dirs (volatile! (vec (rest dirs)))
               at-top? (= d dir)
-              aliased? (not= d dreal)]
+              aliased? (not= d dreal)
+              rel (if at-top? "" (subs d (inc (count dir))))]
           (when-not (contains? @visited dreal)
             (vswap! visited conj dreal)
-            (vswap! stats update :dirs inc)
             (let [entries (try (.readdirSync fs d #js{:withFileTypes true})
                                (catch :default _
                                  (vswap! stats update :unreadable-dirs inc)
-                                 #js[]))]
-              (doseq [e entries]
-                (let [name (.-name e)]
-                  (when-not (or (contains? skip-dirs name)
-                                (and at-top? (contains? ignored name)))
-                    (let [full (.join path d name)
-                          link? (.isSymbolicLink e)
-                          [file? dir?] (if link?
-                                         (let [st (try (.statSync fs full) (catch :default _ nil))]
-                                           (if st [(.isFile st) (.isDirectory st)] [false false]))
-                                         [(.isFile e) (.isDirectory e)])]
-                      (cond
-                        (and file? (contains? scan-exts (.extname path name)))
-                        (let [rf (if (or link? aliased?) (realpath full) full)]
-                          (when-not (contains? @seen-files rf)
-                            (vswap! seen-files conj rf)
-                            (vswap! out conj rf)))
-                        dir?
-                        (if (and (not (:include-worktrees opts)) (linked-worktree? full))
-                          (vswap! stats update :skipped-worktrees inc)
-                          (vswap! next-dirs conj [full (if (or link? aliased?) (realpath full) full)]))
-                        :else nil)))))))
+                                 #js[]))
+                  names (into #{} (map #(.-name %)) entries)
+                  repo (if (and (seq rel) (contains? names ".git")) rel repo)
+                  group (group-of rel repo)]
+              (cond
+                (contains? @pruned group) nil
+                (contains? names "pyvenv.cfg") (vswap! stats update :skipped-venvs inc)
+                :else
+                (let [found (volatile! false)]
+                  (vswap! stats update :dirs inc)
+                  (doseq [e entries]
+                    (let [name (.-name e)]
+                      (when-not (or (contains? skip-dirs name)
+                                    (and at-top? (contains? ignored name)))
+                        (let [full (.join path d name)
+                              link? (.isSymbolicLink e)
+                              [file? dir?] (if link?
+                                             (let [st (try (.statSync fs full) (catch :default _ nil))]
+                                               (if st [(.isFile st) (.isDirectory st)] [false false]))
+                                             [(.isFile e) (.isDirectory e)])]
+                          (cond
+                            (and file? (contains? scan-exts (.extname path name)))
+                            (let [rf (if (or link? aliased?) (realpath full) full)]
+                              (vreset! found true)
+                              (when-not (contains? @seen-files rf)
+                                (vswap! seen-files conj rf)
+                                (vswap! out conj rf)))
+                            dir?
+                            (if (and (not (:include-worktrees opts)) (linked-worktree? full))
+                              (vswap! stats update :skipped-worktrees inc)
+                              (vswap! next-dirs conj [full (if (or link? aliased?) (realpath full) full) repo]))
+                            :else nil)))))
+                  (if @found
+                    (vswap! runs assoc group 0)
+                    (let [n (inc (get @runs group 0))]
+                      (vswap! runs assoc group n)
+                      (when (>= n budget) (vswap! pruned conj group))))))))
           (recur @next-dirs))
         :done))
-    {:files @out :stats @stats}))
+    {:files @out :stats (assoc @stats :pruned-groups (sort @pruned))}))
 
 (defn- rel-path [full]
   (if (str/starts-with? full (str top "/"))
@@ -253,6 +298,9 @@
                     "\tgitignore-checked=" (:gitignore-checked stats)
                     "\tunreadable=" (:unreadable stats)
                     "\tunreadable-dirs=" (:unreadable-dirs stats)
+                    "\tskipped-venvs=" (:skipped-venvs stats)
+                    "\tpruned=" (count (:pruned-groups stats))
+                    "\tpruned-groups=" (str/join ";" (:pruned-groups stats))
                     "\tsymbols=" (count symbols))
         rows (map (fn [{:keys [sym kind file line ns nested]}]
                     (str sym "\t" kind "\t" file "\t" line "\t" ns "\t" (if nested "n" "")))
@@ -293,6 +341,10 @@
                   (if (:gitignore-checked stats) "" "\t(not checked: no git or top is not a repo)")))
     (println (str "UNREADABLE\t" (:unreadable stats)))
     (println (str "UNREADABLE-DIRS\t" (:unreadable-dirs stats)))
+    (println (str "SKIPPED-VENVS\t" (:skipped-venvs stats)))
+    (println (str "PRUNED\t" (count (:pruned-groups stats))
+                  (when (seq (:pruned-groups stats))
+                    (str "\t(" prune-budget " consecutive dirs without source; see `status`, or build --no-prune)"))))
     (if (zero? (:scanned stats))
       (refuse "scanned 0 files under " top " — empty tree or wrong top (set CLAUDE_PROJECT_DIR or cd)")
       (do (write-index built)
@@ -458,7 +510,10 @@
           (refuse "index is not v2 TSV (stale JSON?) — run build")
           (let [age-min (js/Math.round (/ (- (.getTime (js/Date.)) (.getTime (js/Date. (:built-at h)))) 60000))]
             (doseq [[k v] (sort-by key h)]
-              (println (str (name k) "\t" v)))
+              (if (= k :pruned-groups)
+                (doseq [g (remove str/blank? (str/split v #";"))]
+                  (println (str "pruned-group\t" g)))
+                (println (str (name k) "\t" v))))
             (println (str "age-minutes\t" age-min))
             (println (str "bytes\t" (.-size (.statSync fs p))))
             (if (not= (:top h) top)
@@ -480,7 +535,7 @@
 
 (defn- usage []
   (println "usage: kbb --backend sci scripts/symbol-index.cljk build|find|show|outline|status [args]")
-  (println "  build [--include-worktrees] — scan .cljk/.cljc/.cljs/.clj/.kotoba and write the index")
+  (println "  build [--include-worktrees] [--no-prune] — scan .cljk/.cljc/.cljs/.clj/.kotoba and write the index")
   (println "  find <term> [term...] — case-insensitive substring search over symbol names (exit 1 = 0 hits)")
   (println "  show <symbol|ns/symbol> — definition snippet (file:line + context lines)")
   (println "  outline <file-suffix|ns> — every definition in a file/namespace, in line order (map before Read)")
@@ -491,7 +546,8 @@
   (let [[cmd & rest-args] args]
     (cond
       (= cmd "build")
-      (do-build {:include-worktrees (some #{"--include-worktrees"} rest-args)})
+      (do-build {:include-worktrees (some #{"--include-worktrees"} rest-args)
+                 :no-prune (some #{"--no-prune"} rest-args)})
 
       (= cmd "find")
       (if (empty? rest-args)

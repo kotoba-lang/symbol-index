@@ -52,11 +52,26 @@ build は 105 s (sys 37 s = stat × 5 万)。→ iteration 3 で対処。
 | 複数行 `^{:doc …}` の def | 取れない | 5,018 件を新たに索引 (ns 形式も) |
 | build 全体 (root corpus、A B A B 交互) | 134.1 s / 149.2 s (load 50 / 25) | **107.7 s / 121.1 s** (load 24 / 28、各周 −20%) |
 
+### iteration 4 (2026-09-15)
+
+観測: 136,302 dir のうち **85% (116,269) は source を 1 つも持たない subtree**
+(takeout / news content / onedrive archive / .venv)。名前では分けられない。
+
+| 仮説 | before | after |
+|---|---|---|
+| 連続 fileless dir 数で data subtree を prune (budget 1000、校正: source を持つ group の最長 run 737) | 全 dir を歩く | 11 group を prune、**失った file 0** (row 集合が同一) |
+| build 全体 (no-prune / prune 交互、load 33–99) | 200.5 s / 179.4 s | **161.9 s / 132.4 s** (−19% / −26%) |
+| walk が実は DFS だった (`(rest dirs)` への conj) | 校正と実装が不一致 | BFS に固定 |
+| virtualenv | 2,776 dir を歩く | `pyvenv.cfg` で skip (8 個) |
+
+prune した group は `status` の `pruned-group` 行に必ず出る。そこにある code を探すなら
+`build --no-prune`。
+
 ## 使い方 (kbb / nbb / babashka どれでも)
 
 ```bash
 # 索引生成 (1 回。superproject 全体で ~105 s、単 repo なら 1 s)
-bin/symbol-index build [--include-worktrees]
+bin/symbol-index build [--include-worktrees] [--no-prune]
 
 # シンボル部分一致検索 (大小無視) → file:line 一覧、exact > prefix > substring
 bin/symbol-index find reconcile
@@ -112,6 +127,9 @@ fixture tree を tmp に作り、script を子プロセスで実行して exit c
   `^{:doc …}` も) + 行頭 `#?(:clj (defn` + indent ≤3 (nested、`~` 印)。indent 4+ は
   取らない。行番号は `(def` のある行。
 - 読めない dir (権限 / 異常な名前) は crash せず `UNREADABLE-DIRS` に数える。
+- 走査は BFS。group (repo 直下 2 段 / repo 外は 4 段) 内で source を持たない dir が
+  1,000 個続いたらその group の残りを歩かず、`PRUNED` と header `pruned-groups` に
+  名前を残す (`status` で見える)。`pyvenv.cfg` を持つ dir は virtualenv として歩かない。
 - 拒否は fail-closed: 無引数 / 未知 subcommand / 欠 term / 不在 symbol / 索引の
   top 不一致 / 空索引 / 旧 JSON 形式は `REFUSE\t<理由>` を印字して **exit 2**。
   hit は exit 0、測って 0 件は exit 1。

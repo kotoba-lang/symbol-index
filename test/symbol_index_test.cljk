@@ -97,6 +97,18 @@
                "\n\n(def ^{:doc \"multi\n  line doc\"}\n  multiline-meta 7)\n"))
   ;; 読めない dir: 中に def を置き、mode 000 にする (root で走ると読めてしまうので
   ;; その場合は check 側で geteuid を見て skip 扱いにする)
+  ;; prune: repo `orgs/p` の data/x の下に 1,050 個の空 dir (group = orgs/p/data/x)。
+  ;; 同じ repo の src は歩かれる。dNNNN の 1 段下に source を置くと、BFS では
+  ;; 1,050 個の dNNNN を全部 (fileless で) 読んだ後なので prune されて見えない
+  ;; (それが prune の意味; status に載る)。readdir 順に依らないよう 1 段下に置く。
+  (.mkdirSync fs (.join path top "orgs" "p" ".git") #js{:recursive true})
+  (write! top "orgs/p/src/p/core.cljk" "(ns p.core)\n(defn kept-in-pruned-repo [] 1)\n")
+  (dotimes [i 1050]
+    (.mkdirSync fs (.join path top "orgs" "p" "data" "x" (str "d" (+ 1000 i))) #js{:recursive true}))
+  (write! top "orgs/p/data/x/d2049/deep/late.cljk" "(defn lost-after-budget [] 1)\n")
+  ;; virtualenv: pyvenv.cfg を持つ dir は歩かない
+  (write! top "orgs/a/.venv-tts/pyvenv.cfg" "home = /usr/bin\n")
+  (write! top "orgs/a/.venv-tts/lib/site.cljk" "(defn only-in-venv [] 1)\n")
   (write! top "locked/x.cljk" "(defn only-in-locked [] 1)\n")
   (.chmodSync fs (.join path top "locked") 0)
   (write! top "orgs/b/src/b/core.cljc"
@@ -125,7 +137,11 @@
 (defn test-build-and-find [top git?]
   (let [{:keys [code out]} (run top "build")]
     (check! "build exit 0" (= 0 code) out)
-    (check! "build prints SCANNED (evidence floor)" (re-find #"(?m)^SCANNED\t3$" out) out)
+    (check! "build prints SCANNED (evidence floor)" (re-find #"(?m)^SCANNED\t4$" out) out)
+    (check! "prune: 1,000 consecutive source-less dirs cut the group and say so"
+            (re-find #"(?m)^PRUNED\t1\t\(1000 consecutive" out) out)
+    (check! "venv: pyvenv.cfg dir skipped and counted"
+            (re-find #"(?m)^SKIPPED-VENVS\t1$" out) out)
     (if (zero? (.geteuid js/process))
       (println "skip\tunreadable dir (running as root, chmod 0 is readable)")
       (check! "unreadable dir is counted, not a crash"
@@ -163,6 +179,11 @@
             (re-find #"(?m)^multiline-meta\tdef\t[^\n]*\t$" idx) idx)
     (check! "reader-cond split over two lines: line is the (defn line, nested"
             (re-find #"(?m)^split-cond\tdefn\torgs/a/src/a/core.cljk\t7\ta.core\tn$" idx) idx)
+    (check! "prune keeps the repo's src and drops only the pruned group"
+            (and (re-find #"kept-in-pruned-repo" idx) (not (re-find #"lost-after-budget" idx))) idx)
+    (check! "pruned group is named in the header"
+            (re-find #"\tpruned-groups=orgs/p/data/x\t" idx) idx)
+    (check! "venv content absent" (not (re-find #"only-in-venv" idx)) idx)
     (check! "4+ space indent is not indexed"
             (not (re-find #"deep-string-def" idx)) idx)
     (check! "ns column filled from the file's (ns …)"
@@ -200,7 +221,13 @@
     (check! "outline unknown target REFUSE exit 2"
             (and (= 2 code) (re-find #"(?m)^REFUSE\tno definitions for nope.core" out)) out))
   (let [{:keys [code out]} (run top "status")]
-    (check! "status exit 0 and prints symbols=" (and (= 0 code) (re-find #"(?m)^symbols\t\d+" out)) out))
+    (check! "status exit 0 and prints symbols=" (and (= 0 code) (re-find #"(?m)^symbols\t\d+" out)) out)
+    (check! "status lists each pruned group on its own line"
+            (re-find #"(?m)^pruned-group\torgs/p/data/x$" out) out))
+  (let [{:keys [code out]} (run top "build" "--no-prune")]
+    (check! "--no-prune walks everything (PRUNED 0) and finds the late file"
+            (and (= 0 code) (re-find #"(?m)^PRUNED\t0$" out)
+                 (re-find #"lost-after-budget" (.readFileSync fs (.join path top ".kotoba-cache" "symbol-index.tsv") "utf8"))) out))
   (let [{:keys [code out]} (run top)]
     (check! "no args exit 2 with usage" (and (= 2 code) (re-find #"usage:" out)) out))
   (let [{:keys [code out]} (run top "bogus")]
