@@ -4,27 +4,77 @@
 `(def...)` / `(ns...)` form に現れるシンボルから「シンボル → file:line」の索引を
 作る。agent がコードを探すとき、full-file read の代わりに snippet を引くための道具。
 
-## 実測 (2026-09-15, Co-Scientist iteration)
+## agent はこう使う (思考を減らす順)
+
+コードを読む前に、この 3 つで済むか試す。全部 1 s 以内・数百 tok。
+
+```
+find <term>          # どこに在るか。1 hit なら snippet まで出る (往復 1 回)
+outline <file|ns>    # file を Read する前の地図: 定義の行番号一覧 (実測 18 倍軽い)
+show <ns/sym>        # 定義の前後 3 行。ns で曖昧性を解く
+```
+
+exit code で判断する: **0 = hit / 1 = 測って 0 件 / 2 = 拒否** (理由は `REFUSE\t…` 行)。
+2 が出たら索引の問題 (top 違い・空・旧形式) —— `status` で素性を見て `build`。
+`find` が 40 件超なら term を長くする。`~` 付きは reader-cond / indent 内の nested 定義。
+
+## 実測 (append-only、正本は `measurements.edn`)
+
+### iteration 1 (2026-09-15)
 
 - full-file read: 平均 **~6,580 tok/query** (p50 2,212 tok)
 - symbol + 前後 3 行 snippet: 平均 **~122 tok/query** → **54 倍削減**
 - 最悪ケース: `catalog.cljk` 1.28M tok の full read は context を破綻させる
 
+### iteration 2 (2026-09-15)
+
+superproject root (orgs/ 含む、51,594 file / 612,791 symbol) で:
+
+| 仮説 | before | after |
+|---|---|---|
+| find / show の wall time | 5.85 s / 5.18 s (108 MB JSON + js->clj) | **0.76 s / 0.64 s** (TSV + native RegExp、kbb 起動 0.49 s 込み) |
+| 正本 path が索引から消える | `apply-pin-advance` が `worktrees/…` 側 1 件のみ | `orgs/kotoba-lang/kagami/src/kagami/db.cljk:81` |
+| metadata を名前に取る | `^:private` 等 38,894 件 (5%) | 0 件 |
+| linked worktree / 生成物 dir の重複 | worktrees/ 305,436 + runs/ 32,025 symbol | skip 34 worktree + 22 gitignored dir |
+| file の地図 | Read 7,611 chars | `outline kagami.db` 423 chars (**18 倍**) |
+| 空索引 / 空 tree | exit 0 で「0 hits」 | REFUSE exit 2 |
+| test | 無し | 32 check、壊したコピー 3 種で赤を確認 |
+
+build は 105 s (sys 37 s = stat × 5 万)。次の候補は `measurements.edn` の `:build-time`。
+
 ## 使い方 (kbb / nbb / babashka どれでも)
 
 ```bash
-# 索引生成 (1 回。対象 tree の規模で数十秒)
-bin/symbol-index build
+# 索引生成 (1 回。superproject 全体で ~105 s、単 repo なら 1 s)
+bin/symbol-index build [--include-worktrees]
 
-# シンボル部分一致検索 → file:line 一覧
+# シンボル部分一致検索 (大小無視) → file:line 一覧、exact > prefix > substring
 bin/symbol-index find reconcile
 
-# 定義の snippet 表示 (前後 3 行)
+# 定義の snippet 表示 (前後 3 行)。ns/ で曖昧性を解く
 bin/symbol-index show kagami.db/apply-pin-advance
+
+# file (path 末尾一致) か ns の定義一覧
+bin/symbol-index outline kagami/db.cljk
+bin/symbol-index outline kagami.db
+
+# 索引の素性 (top / built-at / scanned / symbols / age)
+bin/symbol-index status
 ```
 
-`build` は `.kotoba-cache/symbol-index.json` (gitignore 推奨) にキャッシュを
-落とす。`find` / `show` はキャッシュが無ければ自動で build する。
+`build` は `.kotoba-cache/symbol-index.tsv` (v2、gitignore 推奨) に落とす。
+`find` / `show` / `outline` は索引が無ければ自動で build する。top は
+`CLAUDE_PROJECT_DIR` があればそれ、無ければ cwd。索引の top と違う場所から
+引くと REFUSE する (別 tree の答えを返さない)。
+
+## 自己検査
+
+```bash
+kbb --backend sci test/symbol_index_test.cljk    # CHECKS<TAB>n / FAILED<TAB>n
+```
+
+fixture tree を tmp に作り、script を子プロセスで実行して exit code と `REFUSE`
+の文言を pin する。8 問 (verification-discipline) の Q1/Q2/Q4/Q5/Q6/Q7 に対応。
 
 ## 挙動
 
@@ -33,8 +83,14 @@ bin/symbol-index show kagami.db/apply-pin-advance
   visited set (realpath) で symlink loop を断つ。
 - Node Stats の `isFile`/`isDirectory` は method — `(.-isFile stat)` は cljs では
   関数が返るだけで真偽にならない。この罠の実装例は src の walk を参照。
-- 拒否は fail-closed: 無引数 / 未知 subcommand / `find` 欠 term / `show` 不在
-  symbol は理由を印字して **exit 2**。hit は exit 0。
+- 走査しないもの: linked worktree (`.git` file が `/worktrees/` を指す dir)、
+  top 直下で gitignore され `.git` を持たない dir (生成物)。名前でなく構造で判定。
+  symlink は realpath で 1 回だけ数え、path も realpath 相対で報告する。
+- 索引する形: 行頭の def form + 名前の前の metadata 読み飛ばし + 行頭
+  `#?(:clj (defn` + indent ≤3 (nested、`~` 印)。indent 4+ は取らない。
+- 拒否は fail-closed: 無引数 / 未知 subcommand / 欠 term / 不在 symbol / 索引の
+  top 不一致 / 空索引 / 旧 JSON 形式は `REFUSE\t<理由>` を印字して **exit 2**。
+  hit は exit 0、測って 0 件は exit 1。
 
 ## 前提
 
@@ -60,6 +116,10 @@ bin/symbol-index show kagami.db/apply-pin-advance
    自己検査を fail-closed で挟む (無引数 / 未知 cmd / 不在 symbol → exit 2)。
 
 実測は iteration ごとに上書きではなく**追記**する。数値の横に測定日を置く。
+正本は `measurements.edn` (1 entry = 1 仮説、`:before` / `:after` / `:verdict`)。
+
+iteration 2 で足した反証の型: **壊したコピーで test が落ちることを確かめてから
+landed とする**。落ちない test は劇場。壊した経路の check だけが落ちることまで見る。
 
 ## 関連
 

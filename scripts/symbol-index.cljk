@@ -3,8 +3,7 @@
 ;; (def...) / (ns...) の top-level form に現れるシンボルから
 ;; 「シンボル → file:line」の索引を作る。
 ;;
-;; なぜ必要か。2026-09-15 の Co-Scientist iteration (対話 ID
-;; 20260915_134652) で実測した:
+;; なぜ必要か。2026-09-15 の Co-Scientist iteration 1 で実測した:
 ;;
 ;;   * コード理解のための full-file read は 1 query あたり平均 ~6,580 tok
 ;;     (p50 2,212 tok)。シンボル位置 + 前後 3 行の snippet なら平均 ~122 tok。
@@ -19,10 +18,16 @@
 ;;   kbb --backend sci scripts/symbol-index.cljk find reconcile  # シンボル検索
 ;;   kbb --backend sci scripts/symbol-index.cljk show kagami.db/apply-pin-advance
 ;;                                                              # 定義の snippet 表示
+;;   kbb --backend sci scripts/symbol-index.cljk outline kagami.db  # file/ns の定義一覧
+;;   kbb --backend sci scripts/symbol-index.cljk status         # 索引の素性
 ;;
-;; 索引は .kotoba-cache/symbol-index.json に落ちる (gitignore 済みの
-;; cache dir 規約に合わせる)。stale 判定は行数 + 最新 mtime の比較。
-;; 完全一致で無い時は部分一致も出す。「無い」と結論する前に find を引く。
+;; 索引は .kotoba-cache/symbol-index.tsv (v2) に落ちる。iteration 2 (2026-09-15)
+;; で JSON + js->clj (108 MB, 5.5 s/query) を捨て、TSV を native RegExp で
+;; 走査する形にした (measurements.edn に実測)。
+;;
+;; exit code は 3 値: 0 = hit / 1 = 測って 0 件 (grep 規約) / 2 = 答えを拒否
+;; (無引数・未知 cmd・索引が空・索引の top が cwd と違う・show の不在 symbol)。
+;; 「測れなかった」と「測って無かった」を同じ値にしない。
 
 (require '[clojure.string :as str])
 
@@ -34,108 +39,266 @@
       (.cwd js/process)))
 
 (def index-dir ".kotoba-cache")
-(def index-file "symbol-index.json")
+(def index-file "symbol-index.tsv")
+(def index-version "v2")
 
 (def ^:private scan-exts #{".cljk" ".cljc" ".cljs" ".clj" ".kotoba"})
-(def ^:private skip-dirs #{".git" "node_modules" ".west" "target" ".cpcache" ".lsp" ".clj-kondo"})
+(def ^:private skip-dirs #{".git" "node_modules" ".west" "target" ".cpcache" ".lsp" ".clj-kondo"
+                           ".kotoba-cache" ".shadow-cljs" ".nbb" "dist" "build"})
 (def ^:private max-file-bytes (* 4 1024 1024))
+(def ^:private find-limit 40)
 
 (def def-form-re
-  "行頭から始まる top-level 定義 form。sexp parser を持ち込まない代わりに、
-  この家系の codebase は top-level def を行頭に置く規約で書かれている。"
-  #"^\((defn|defn-|def|defonce|defmacro|defmulti|defmethod|defprotocol|defrecord|deftype|ns|deftest)\s+(\S+)")
+  "top-level 定義 form。sexp parser を持ち込まない代わりに、この家系の codebase は
+  top-level def を行頭に置く規約で書かれている。iteration 2 で足した形:
+    * 行頭 `#?(:clj (defn …` の inline reader conditional (実測 1,347 行)
+    * 3 桁以内の浅い indent (`#?(:clj\\n   (defn …` / `(comment\\n  (defn …`、
+      実測 3,393 行)。4 桁以上は test の文字列内 code が多いので取らない。
+    * 名前の前の metadata `^:private` / `^{:doc \"…\"}` / `^String` を読み飛ばす
+      (iteration 1 では 38,894 件 = 5% が `^:private` という名前で索引に載った)。
+  group 1 = reader-cond / indent の有無 (nested 判定)、2 = kind、3 = name。"
+  #"^((?:#\?\(:\w+\s+)|\s{1,3})?\((defn|defn-|def|defonce|defmacro|defmulti|defmethod|defprotocol|defrecord|deftype|ns|deftest)\s+(?:(?:\^\{[^}]*\}|\^\S+)\s+)*([^\s\^\(\)\[\]\{\}\"]+)")
+
+(defn- linked-worktree?
+  "`.git` が **file** で `gitdir: …/.git/worktrees/<name>` を指す = git の linked
+  worktree。主 checkout と同じ内容の写しなので既定では走査しない (submodule の
+  gitfile は `.git/modules/…` を指すので該当しない)。名前 (`worktrees/`, `_wt-*`)
+  ではなく実在する構造で判定する (itonami-maturity-scan の virtualenv? と同じ理由)。"
+  [dir]
+  (let [g (.join path dir ".git")]
+    (try
+      (let [st (.statSync fs g)]
+        (and (.isFile st)
+             (str/includes? (.readFileSync fs g "utf8") "/worktrees/")))
+      (catch :default _ false))))
+
+(defn- gitignored-children
+  "top が git repo なら、top **直下** の entry のうち gitignore され、かつ自身が
+  git repo でない (`.git` を持たない) ものの名前集合。生成物 dir (`runs/`
+  `verify-runs/` 等、実測で 3.2 万 symbol) を索引から外す。west の子 repo は
+  root の .gitignore に載っているが `.git` を持つので残る。深さ 2 以上は見ない
+  (5,000 行の .gitignore に対する check-ignore が depth 2 で 30 s、depth 1 で
+  0.85 s と測ったため)。git が無い / top が repo でない → 空集合 (skip 0 は
+  「何も無い」ではなく「測っていない」なので stats に :gitignore-checked を残す)。"
+  []
+  (if-not (.existsSync fs (.join path top ".git"))
+    {:names #{} :checked false}
+    (try
+      (let [cp (js/require "node:child_process")
+            names (remove #{".git"} (js->clj (.readdirSync fs top)))
+            out (.execFileSync cp "git" #js["check-ignore" "--stdin"]
+                               #js{:cwd top :input (str (str/join "\n" names) "\n")
+                                   :encoding "utf8" :stdio #js["pipe" "pipe" "ignore"]})
+            ignored (remove str/blank? (str/split-lines out))]
+        {:checked true
+         :names (into #{} (remove #(.existsSync fs (.join path top % ".git"))) ignored)})
+      ;; check-ignore は 1 件も ignore が無いと exit 1 で throw する。それ以外
+      ;; (git 不在 / exit 128) は「測れなかった」なので checked false。
+      (catch :default e {:names #{} :checked (= 1 (.-status e))}))))
 
 (defn- walk
-  "dir 配下の走査対象 file を相対 path で返す。west の子 repo は symlink
-  checkout なので symlink の **指先** を辿る (statSync)。visited set で
-  symlink loop を断つ。⚠ Node Stats の isFile/isDirectory は method —
-  (.-isFile stat) は関数が返るだけで真偽にならない。"
-  [dir]
+  "dir 配下の走査対象 file を返す。west の子 repo は symlink checkout なので
+  symlink の **指先** を辿る (statSync)。visited set (realpath) で symlink loop
+  を断つ。⚠ Node Stats の isFile/isDirectory は method — (.-isFile stat) は
+  関数が返るだけで真偽にならない。
+
+  iteration 2: 返す path は **realpath** にする。iteration 1 は symlink 側の path
+  を返していたので `worktrees/kotoba-lang/kagami/...` が先に踏まれると正本の
+  `orgs/kotoba-lang/kagami/...` が索引から消えた (実測: apply-pin-advance が
+  worktrees/ 側 1 件のみ)。返り値は {:files [...] :stats {...}}。"
+  [dir opts]
   (let [out (volatile! [])
-        visited (volatile! #{})]
+        seen-files (volatile! #{})
+        visited (volatile! #{})
+        {ignored :names checked :checked} (gitignored-children)
+        stats (volatile! {:dirs 0 :skipped-worktrees 0
+                          :skipped-gitignored (count ignored)
+                          :gitignore-checked checked})]
     (loop [dirs [dir]]
       (if-let [d (first dirs)]
         (let [real (try (.realpathSync fs d) (catch :default _ d))
-              next-dirs (volatile! (rest dirs))]
+              next-dirs (volatile! (rest dirs))
+              at-top? (= d dir)]
           (when-not (contains? @visited real)
             (vswap! visited conj real)
+            (vswap! stats update :dirs inc)
             (doseq [name (.readdirSync fs d)]
-              (if (contains? skip-dirs name)
+              (if (or (contains? skip-dirs name)
+                      (and at-top? (contains? ignored name)))
                 nil
                 (let [full (.join path d name)
                       stat (try (.statSync fs full) (catch :default _ nil))]
                   (cond
                     (nil? stat) nil
                     (and (.isFile stat) (contains? scan-exts (.extname path name)))
-                    (vswap! out conj full)
-                    (.isDirectory stat) (vswap! next-dirs conj full)
+                    (let [rf (try (.realpathSync fs full) (catch :default _ full))]
+                      (when-not (contains? @seen-files rf)
+                        (vswap! seen-files conj rf)
+                        (vswap! out conj rf)))
+                    (.isDirectory stat)
+                    (if (and (not (:include-worktrees opts)) (linked-worktree? full))
+                      (vswap! stats update :skipped-worktrees inc)
+                      (vswap! next-dirs conj full))
                     :else nil)))))
           (recur @next-dirs))
         :done))
+    {:files @out :stats @stats}))
+
+(defn- rel-path [full]
+  (if (str/starts-with? full (str top "/"))
+    (subs full (inc (count top)))
+    full))
+
+(defn- scan-file
+  "1 file から [{sym kind file line ns nested}] を返す。`(ns …)` を跨ぐごとに ns を
+  持ち替え、後続の def にその ns を付ける (show の ns/sym 曖昧性解消に使う)。"
+  [full rel]
+  (let [text (.readFileSync fs full "utf8")
+        ns* (volatile! "")
+        out (volatile! [])]
+    (doseq [[i line] (map-indexed vector (str/split-lines text))]
+      (when-let [m (re-find def-form-re line)]
+        (let [kind (nth m 2) sym (nth m 3) nested (some? (nth m 1))]
+          (when (= kind "ns") (vreset! ns* sym))
+          (vswap! out conj {:sym sym :kind kind :file rel :line (inc i)
+                            :ns (if (= kind "ns") sym @ns*)
+                            :nested nested}))))
     @out))
 
 (defn- build-index
-  "全対象 file から [{sym file line kind}] を作る。walk は絶対 path を返すので
-  file 名の表示用に top で始まる相対 path へ縮める。"
-  []
-  (let [files (walk top)
-        out (volatile! [])]
+  "全対象 file から symbol 列と走査統計を作る。統計は evidence floor: SCANNED が
+  0 の索引は書かない (「空の tree」と「top を間違えた」を pass に混ぜない)。"
+  [opts]
+  (let [{:keys [files stats]} (walk top opts)
+        out (volatile! [])
+        st (volatile! (assoc stats :scanned 0 :skipped-size 0 :unreadable 0))]
     (doseq [full files]
-      (let [rel (if (str/starts-with? full top)
-                  (subs full (inc (count top)))
-                  full)]
+      (let [rel (rel-path full)]
         (try
-          (when (<= (.-size (.statSync fs full)) max-file-bytes)
-            (let [text (.readFileSync fs full "utf8")]
-              (doseq [[i line] (map-indexed vector (str/split-lines text))]
-                (when-let [m (re-find def-form-re line)]
-                  (vswap! out conj {:sym (nth m 2)
-                                    :kind (nth m 1)
-                                    :file rel
-                                    :line (inc i)})))))
-          (catch :default _ nil))))
-    @out))
+          (if (<= (.-size (.statSync fs full)) max-file-bytes)
+            (do (vswap! st update :scanned inc)
+                (vswap! out into (scan-file full rel)))
+            (vswap! st update :skipped-size inc))
+          (catch :default _ (vswap! st update :unreadable inc)))))
+    {:symbols @out :stats @st}))
 
-(defn- index-stale?
-  [meta]
-  (let [idx-path (.join path top index-dir index-file)]
-    (or (not (.existsSync fs idx-path))
-        (try
-          (let [saved (js->clj (.parse js/JSON (.readFileSync fs idx-path "utf8")) :keywordize-keys true)
-                now (.getTime (js/Date.))]
-            (or (not= (count (:files saved)) (:files meta))
-                (not= (:built-at saved) nil) false))
-          (catch :default true)))))
+;; ---------------------------------------------------------------- TSV v2
+;; header: #symbol-index<TAB>v2<TAB>key=value ...
+;; row:    sym<TAB>kind<TAB>file<TAB>line<TAB>ns<TAB>flags   (flags: "" | "n")
+
+(defn- index-path [] (.join path top index-dir index-file))
 
 (defn- write-index
-  [syms]
-  (let [dir (.join path top index-dir)]
+  [{:keys [symbols stats]}]
+  (let [dir (.join path top index-dir)
+        header (str "#symbol-index\t" index-version
+                    "\ttop=" top
+                    "\tbuilt-at=" (.toISOString (js/Date.))
+                    "\tscanned=" (:scanned stats)
+                    "\tskipped-size=" (:skipped-size stats)
+                    "\tskipped-worktrees=" (:skipped-worktrees stats)
+                    "\tskipped-gitignored=" (:skipped-gitignored stats)
+                    "\tgitignore-checked=" (:gitignore-checked stats)
+                    "\tunreadable=" (:unreadable stats)
+                    "\tsymbols=" (count symbols))
+        rows (map (fn [{:keys [sym kind file line ns nested]}]
+                    (str sym "\t" kind "\t" file "\t" line "\t" ns "\t" (if nested "n" "")))
+                  symbols)]
     (when-not (.existsSync fs dir)
       (.mkdirSync fs dir #js{:recursive true}))
-    (.writeFileSync fs (.join path dir index-file)
-                    (.stringify js/JSON (clj->js {:built-at (.toISOString (js/Date.))
-                                                  :count (count syms)
-                                                  :symbols syms}))
-                    "utf8")))
+    (.writeFileSync fs (index-path) (str header "\n" (str/join "\n" rows) "\n") "utf8")))
 
-(defn- load-index
-  "索引を返す。無ければ build してから返す。"
+(defn- parse-header
+  "先頭行を {:version :top :scanned :symbols ...} に。v1 (JSON) や壊れた先頭は nil。"
+  [text]
+  (let [nl (.indexOf text "\n")
+        line (if (neg? nl) text (subs text 0 nl))
+        [tag version & kvs] (str/split line #"\t")]
+    (when (= tag "#symbol-index")
+      (into {:version version}
+            (map (fn [kv] (let [i (.indexOf kv "=")]
+                            [(keyword (subs kv 0 i)) (subs kv (inc i))])))
+            kvs))))
+
+(defn- parse-row [line]
+  (let [[sym kind file ln ns flags] (str/split line #"\t")]
+    {:sym sym :kind kind :file file :line (js/parseInt ln 10) :ns (or ns "")
+     :nested (= flags "n")}))
+
+(defn- refuse
+  "拒否は理由を印字して 2 を返す。理由の literal は test が pin する。"
+  [& msg]
+  (println (str "REFUSE\t" (apply str msg)))
+  2)
+
+(defn- do-build [opts]
+  (let [{:keys [symbols stats] :as built} (build-index opts)]
+    (println (str "SCANNED\t" (:scanned stats)))
+    (println (str "SKIPPED-SIZE\t" (:skipped-size stats)))
+    (println (str "SKIPPED-WORKTREES\t" (:skipped-worktrees stats)))
+    (println (str "SKIPPED-GITIGNORED\t" (:skipped-gitignored stats)
+                  (if (:gitignore-checked stats) "" "\t(not checked: no git or top is not a repo)")))
+    (println (str "UNREADABLE\t" (:unreadable stats)))
+    (if (zero? (:scanned stats))
+      (refuse "scanned 0 files under " top " — empty tree or wrong top (set CLAUDE_PROJECT_DIR or cd)")
+      (do (write-index built)
+          (println (str "indexed " (count symbols) " symbols -> " index-dir "/" index-file))
+          0))))
+
+(defn- load-index-text
+  "索引の本文 (TSV 全文) と header を返す。無ければ build してから読む。
+  top 不一致 / 空 / 旧形式は {:error …} を返す (呼び側が refuse する)。"
   []
-  (let [idx-path (.join path top index-dir index-file)]
-    (if (.existsSync fs idx-path)
-      (try
-        (let [saved (js->clj (.parse js/JSON (.readFileSync fs idx-path "utf8")) :keywordize-keys true)]
-          (mapv #(select-keys % [:sym :kind :file :line]) (:symbols saved)))
-        (catch :default
-            (do (println "index unreadable — rebuilding...")
-                (let [syms (build-index)]
-                  (write-index syms)
-                  syms))))
-      (do (println "index not found — building first...")
-          (let [syms (build-index)]
-            (write-index syms)
-            (println (str "indexed " (count syms) " symbols"))
-            syms)))))
+  (let [p (index-path)]
+    (when-not (.existsSync fs p)
+      (println "index not found — building first...")
+      (do-build {}))
+    (if-not (.existsSync fs p)
+      {:error (str "no index at " p)}
+      (let [text (.readFileSync fs p "utf8")
+            h (parse-header text)]
+        (cond
+          (nil? h) {:error "index is not v2 TSV (stale JSON?) — run build"}
+          (not= (:top h) top) {:error (str "index was built for top=" (:top h) " but cwd top=" top " — run build here")}
+          (= "0" (:symbols h)) {:error (str "index has 0 symbols (scanned " (:scanned h) " files) — run build")}
+          :else {:header h :text text})))))
+
+(defn- escape-re [s]
+  (str/replace s #"[.*+?^${}()|\[\]\\/]" "\\$&"))
+
+(defn- scan-rows
+  "TSV 本文を native RegExp で走査し、当たった行だけ parse する。SCI の per-line
+  loop を回さないのが iteration 2 の速度の源 (5.5 s → 実測は measurements.edn)。
+  sym-pattern は sym 列に対する正規表現の断片、flags は RegExp flags。"
+  [text sym-pattern flags]
+  (let [re (js/RegExp. (str "^" sym-pattern "\\t[^\\n]*$") (str "gm" flags))
+        out (volatile! [])]
+    (loop []
+      (when-let [m (.exec re text)]
+        (vswap! out conj (parse-row (aget m 0)))
+        (recur)))
+    @out))
+
+(defn- age-warning
+  "索引が 24 h より古ければ 1 行だけ言う。自動 rebuild はしない (2 分かかる判断を
+  黙って agent に肩代わりさせない)。"
+  [header]
+  (let [ms (- (.getTime (js/Date.)) (.getTime (js/Date. (:built-at header))))]
+    (when (> ms (* 24 3600 1000))
+      (println (str "  (index is " (js/Math.round (/ ms 3600000)) " h old — `build` if you edited code since)")))))
+
+(defn- rank-key
+  "exact < prefix < substring、同点は top-level が nested より先、次に path。"
+  [term-lower {:keys [sym nested file]}]
+  (let [s (str/lower-case sym)]
+    [(cond (= s term-lower) 0 (str/starts-with? s term-lower) 1 :else 2)
+     (if nested 1 0)
+     (count file)
+     file]))
+
+(defn- fmt-hit
+  [{:keys [sym kind file line nested]}]
+  (str "  " (if nested "~" "") kind " " sym " — " file ":" line))
 
 (defn- snippet
   "file の line から前後 ctx 行を返す。"
@@ -150,41 +313,104 @@
                             (range from to))))
       (catch :default _ "  (unreadable)"))))
 
-(defn- fmt-hit
-  [{:keys [sym kind file line]}]
-  (str "  " kind " " sym " — " file ":" line))
-
 (defn- cmd-find
   [terms]
-  (let [syms (load-index)
-        lower (map str/lower-case terms)
-        hits (filter (fn [{:keys [sym]}]
-                       (let [s (str/lower-case sym)]
-                         (some #(str/includes? s %) lower)))
-                     syms)]
-    (println (str "indexed " (count syms) " symbols, " (count hits) " hits for "
-                  (str/join " " terms)))
-    (doseq [h (take 40 hits)]
-      (println (fmt-hit h)))
-    (when (> (count hits) 40)
-      (println (str "  ... " (- (count hits) 40) " more (narrow the term)")))))
+  (let [{:keys [header text error]} (load-index-text)]
+    (if error
+      (refuse error)
+      (let [hits (distinct (mapcat #(scan-rows text (str "[^\\t\\n]*" (escape-re %) "[^\\t\\n]*") "i") terms))
+            term0 (str/lower-case (first terms))
+            ranked (sort-by #(rank-key term0 %) hits)]
+        (println (str "indexed " (:symbols header) " symbols, " (count hits) " hits for "
+                      (str/join " " terms)))
+        (age-warning header)
+        (doseq [h (take find-limit ranked)]
+          (println (fmt-hit h)))
+        (when (> (count hits) find-limit)
+          (println (str "  ... " (- (count hits) find-limit) " more (narrow the term)")))
+        ;; 1 件なら show を待たずに snippet まで出す (round trip を 1 つ減らす)
+        (when (= 1 (count hits))
+          (let [{:keys [file line]} (first hits)]
+            (println (snippet file line))))
+        (if (seq hits) 0 1)))))
 
 (defn- cmd-show
+  "`sym` / `ns/sym` / `sym:line` を受ける。ns が付いていれば ns 列で絞り、絞って
+  0 件なら leaf だけで引き直す (その旨を印字)。"
   [target]
-  (let [[sym-part] (str/split target #":")
-        syms (load-index)
-        ;; "ns/sym" の場合は末尾セグメントで絞る
-        leaf (last (str/split sym-part #"/"))
-        hits (filter #(= (:sym %) sym-part) syms)
-        hits (if (seq hits) hits (filter #(= (:sym %) leaf) syms))]
-    (if (empty? hits)
-      (do (println (str "no exact match for " target " — try: find " leaf))
-          2)
-      (do
-        (doseq [{:keys [file line sym kind]} (take 3 hits)]
-          (println (str "== " kind " " sym " — " file ":" line))
-          (println (snippet file line)))
-        0))))
+  (let [{:keys [text error]} (load-index-text)]
+    (if error
+      (refuse error)
+      (let [[sym-part] (str/split target #":")
+            slash (.lastIndexOf sym-part "/")
+            ns-part (when (pos? slash) (subs sym-part 0 slash))
+            leaf (if (pos? slash) (subs sym-part (inc slash)) sym-part)
+            all (scan-rows text (escape-re leaf) "")
+            in-ns (when ns-part (filter #(= (:ns %) ns-part) all))
+            hits (cond (seq in-ns) in-ns
+                       (and ns-part (seq all))
+                       (do (println (str "no " leaf " in ns " ns-part " — showing " leaf " from other ns")) all)
+                       :else all)
+            hits (sort-by #(rank-key (str/lower-case leaf) %) hits)]
+        (if (empty? hits)
+          (refuse "no exact match for " target " — try: find " leaf)
+          (do
+            (doseq [{:keys [file line sym kind ns]} (take 3 hits)]
+              (println (str "== " kind " " (if (seq ns) (str ns "/") "") sym " — " file ":" line))
+              (println (snippet file line)))
+            (when (> (count hits) 3)
+              (println (str "  ... " (- (count hits) 3) " more definitions of " leaf " (qualify with ns/)")))
+            0))))))
+
+(defn- cmd-outline
+  "file (path の末尾一致) か ns (完全一致) の定義を行順に並べる。file を Read する
+  前の地図: 1 行 ≈ 10 tok なので 100 def の file でも ~1k tok で済む。"
+  [target]
+  (let [{:keys [header text error]} (load-index-text)]
+    (if error
+      (refuse error)
+      (let [by-path? (or (str/includes? target "/") (re-find #"\.(cljk|cljc|cljs|clj|kotoba)$" target))
+            rows (if by-path?
+                   (let [re (js/RegExp. (str "^[^\t\n]*\t[^\t\n]*\t[^\t\n]*" (escape-re target) "\t[^\n]*$") "gm")
+                         out (volatile! [])]
+                     (loop [] (when-let [m (.exec re text)] (vswap! out conj (parse-row (aget m 0))) (recur)))
+                     @out)
+                   (let [re (js/RegExp. (str "^[^\t\n]*\t[^\t\n]*\t[^\t\n]*\t\\d+\t" (escape-re target) "\t[^\n]*$") "gm")
+                         out (volatile! [])]
+                     (loop [] (when-let [m (.exec re text)] (vswap! out conj (parse-row (aget m 0))) (recur)))
+                     @out))
+            files (distinct (map :file rows))]
+        (if (empty? rows)
+          (refuse "no definitions for " target " — try: find " (last (str/split target #"[/.]")))
+          (do
+            (age-warning header)
+            (doseq [f (take 5 files)]
+              (println (str "== " f))
+              (doseq [{:keys [line kind sym nested]} (sort-by :line (filter #(= f (:file %)) rows))]
+                (println (str "  " line "\t" (if nested "~" "") kind " " sym))))
+            (when (> (count files) 5)
+              (println (str "  ... " (- (count files) 5) " more files match " target " (give a longer path)")))
+            0))))))
+
+(defn- cmd-status
+  "索引の素性を印字する。dead code だった iteration 1 の index-stale? の代わり:
+  鮮度は自動判定せず built-at と age を見せ、判断を人に返す。"
+  []
+  (let [p (index-path)]
+    (if-not (.existsSync fs p)
+      (refuse "no index at " p " — run build")
+      (let [text (.readFileSync fs p "utf8")
+            h (parse-header text)]
+        (if (nil? h)
+          (refuse "index is not v2 TSV (stale JSON?) — run build")
+          (let [age-min (js/Math.round (/ (- (.getTime (js/Date.)) (.getTime (js/Date. (:built-at h)))) 60000))]
+            (doseq [[k v] (sort-by key h)]
+              (println (str (name k) "\t" v)))
+            (println (str "age-minutes\t" age-min))
+            (println (str "bytes\t" (.-size (.statSync fs p))))
+            (if (not= (:top h) top)
+              (refuse "index top=" (:top h) " differs from cwd top=" top)
+              0)))))))
 
 (defn- script-args
   "nbb / kbb どちらでも *command-line-args* が空のことがあるため
@@ -199,35 +425,45 @@
                         argv))]
       (if (some? index) (subvec argv (inc index)) []))))
 
+(defn- usage []
+  (println "usage: kbb --backend sci scripts/symbol-index.cljk build|find|show|outline|status [args]")
+  (println "  build [--include-worktrees] — scan .cljk/.cljc/.cljs/.clj/.kotoba and write the index")
+  (println "  find <term> [term...] — case-insensitive substring search over symbol names (exit 1 = 0 hits)")
+  (println "  show <symbol|ns/symbol> — definition snippet (file:line + context lines)")
+  (println "  outline <file-suffix|ns> — every definition in a file/namespace, in line order (map before Read)")
+  (println "  status — index header (top / built-at / scanned / symbols) and age")
+  2)
+
 (defn -main [& args]
   (let [[cmd & rest-args] args]
     (cond
       (= cmd "build")
-      (let [syms (build-index)]
-        (write-index syms)
-        (println (str "indexed " (count syms) " symbols -> " index-dir "/" index-file)))
+      (do-build {:include-worktrees (some #{"--include-worktrees"} rest-args)})
 
       (= cmd "find")
       (if (empty? rest-args)
-        (do (println "usage: symbol-index.cljk find <term> [term...]") 2)
+        (refuse "find needs at least one term")
         (cmd-find rest-args))
 
       (= cmd "show")
       (if (empty? rest-args)
-        (do (println "usage: symbol-index.cljk show <symbol>  (e.g. kagami.db/apply-pin-advance)") 2)
+        (refuse "show needs a symbol (e.g. kagami.db/apply-pin-advance)")
         (cmd-show (first rest-args)))
 
+      (= cmd "outline")
+      (if (empty? rest-args)
+        (refuse "outline needs a file suffix or a namespace (e.g. kagami/db.cljk or kagami.db)")
+        (cmd-outline (first rest-args)))
+
+      (= cmd "status")
+      (cmd-status)
+
       :else
-      (do (println "usage: kbb --backend sci scripts/symbol-index.cljk build|find|show [args]")
-          (println "  build — scan .cljk/.cljc/.cljs/.clj/.kotoba and write the index")
-          (println "  find <term> — substring search over symbol names")
-          (println "  show <symbol> — definition snippet (file:line + context lines)")
-          2))))
+      (usage))))
 
 (let [args (script-args)]
   (if (seq args)
     (let [code (apply -main args)]
-      (when-not (and (number? code) (zero? code))
-        (.exit js/process (if (number? code) code 0))))
-    (do (println "usage: kbb --backend sci scripts/symbol-index.cljk build|find|show [args]")
+      (.exit js/process (if (number? code) code 0)))
+    (do (usage)
         (.exit js/process 2))))
