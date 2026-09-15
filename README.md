@@ -67,6 +67,20 @@ build は 105 s (sys 37 s = stat × 5 万)。→ iteration 3 で対処。
 prune した group は `status` の `pruned-group` 行に必ず出る。そこにある code を探すなら
 `build --no-prune`。
 
+### iteration 5 (2026-09-15) — 「kotoba-lang の find / grep で速くなるか」
+
+phase 内訳 (prune 後 74,419 dir、load 54): **walk 121.7 s** / scan 40.3 s / write 5.9 s。
+
+| 仮説 | 結果 |
+|---|---|
+| `org-ieee-find` (amu native) を walk に使う | **今は不可**: 式 (`-prune`) が無い、arena が reclaim せず上限 (pairs 4,194,304 / string-pool 256 MB) で ~3 万 entry で SIGILL、同じ set で `/usr/bin/find` の 5–6 倍遅い (8,719 entry: 0.67 s vs 0.12 s)。再評価条件は arena reclaim か `-prune` 相当 |
+| `/usr/bin/find -L` を fast path に | **不採用**: load 90–130 の共有機では I/O bound。全 tree の find 93.7 / 88.0 s ≒ prune 後の SCI walk 131.5 / 95.2 s。SCI overhead は上限でも 3 割 |
+| 子 dir ごとの `.git` statSync (74K 回) を dirent 判定に | A B A B: 156.7 / 172.0 s → **141.2 / 150.7 s** (−10% / −12%) |
+
+build は I/O bound で、この機械の load 次第で 2 倍ぶれる。以後 build の最適化は
+「syscall を減らす」以外に lever が無いので、次は query 側の実測 (agent が実際に
+何 tok 使ったか) に戻る。
+
 ## 使い方 (kbb / nbb / babashka どれでも)
 
 ```bash
