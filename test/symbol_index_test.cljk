@@ -209,7 +209,16 @@
             (and (= 2 code) (re-find #"(?m)^REFUSE\tno exact match for no-such-symbol-xyz" out)) out))
   (let [{:keys [code out]} (run top "find" "hidden-fn")]
     (check! "find with exactly 1 hit prints the snippet inline (no second round trip)"
-            (and (= 0 code) (re-find #"(?m)^  2\| \(defn \^:private hidden-fn" out)) out))
+            (and (= 0 code) (re-find #"(?m)^  2\| \(defn \^:private hidden-fn" out)) out)
+    (check! "snippet is forward-biased: 1 line before, 6 after (the definition's opening)"
+            (and (re-find #"(?m)^  1\| \(ns a.core\)" out) (re-find #"(?m)^  8\| " out) (not (re-find #"(?m)^  9\| " out))) out))
+  (let [{:keys [code out]} (run top "find" "same-name")]
+    (check! "find with 2 hits prints both snippets, each under its own == header"
+            (and (= 0 code) (= 2 (count (re-seq #"(?m)^== defn same-name — " out)))
+                 (re-find #"(?m)^  2\| \(defn same-name \[\] :b\)" out)) out))
+  (let [{:keys [code out]} (run top "find" "-")]
+    (check! "find with more than 3 hits prints no snippets"
+            (and (= 0 code) (not (re-find #"(?m)^  \d+\| " out))) out))
   (let [{:keys [code out]} (run top "outline" "b/core.cljc")]
     (check! "outline by file suffix lists defs in line order"
             (and (= 0 code) (re-find #"(?m)^== orgs/b/src/b/core.cljc\n  1\tns b.core\n  2\tdefn same-name$" out)) out))
@@ -282,6 +291,47 @@
       (check! "SYMBOL_INDEX_ROOT overrides an unrelated cwd"
               (and (= 0 code) (re-find #"1 hits for root-only-fn" out)) out))))
 
+(defn test-top-is-worktree []
+  (let [top (mk-tmp "wt-top")]
+    (write! top "src/x.cljk" "(defn in-worktree-top [] 1)\n")
+    (write! top ".git" (str "gitdir: " top "/../main/.git/worktrees/wt-top\n"))
+    (let [{:keys [code out]} (run top "build")]
+      (check! "top that is itself a linked worktree is still indexed"
+              (and (= 0 code) (re-find #"(?m)^SCANNED\t1$" out)) out))))
+
+(defn test-incremental []
+  (let [top (mk-tmp "incr")
+        idx-file (fn [] (.readFileSync fs (.join path top ".kotoba-cache" "symbol-index.tsv") "utf8"))
+        strip #(str/join "\n" (sort (rest (str/split-lines %))))]
+    (write! top "a/one.cljk" "(ns one)\n(defn f1 [] 1)\n")
+    (write! top "b/two.cljk" "(ns two)\n(defn f2 [] 2)\n")
+    (let [{:keys [out]} (run top "build")]
+      (check! "cold build: nothing cached" (re-find #"(?m)^CACHED-FILES\t0\tof 2$" out) out))
+    (let [cold (idx-file)
+          _ (run top "build")            ; 1 回目の warm は top の mtime が .kotoba-cache 作成で変わっている
+          {:keys [out]} (run top "build")
+          warm (idx-file)]
+      (check! "warm build: every dir and file served from cache"
+              (and (re-find #"(?m)^CACHED-FILES\t2\tof 2$" out) (re-find #"(?m)^CACHED-DIRS\t3\tof 3$" out)) out)
+      (check! "warm build rows identical to cold" (= (strip cold) (strip warm)) (str cold "\n---\n" warm)))
+    ;; 1) 既存 file の書き換え (size が変わる) → その file だけ再 scan
+    (write! top "a/one.cljk" "(ns one)\n(defn f1 [] 1)\n(defn f1-added [] 3)\n")
+    (let [{:keys [out]} (run top "build") idx (idx-file)]
+      (check! "changed file is re-scanned, the other served from cache"
+              (and (re-find #"(?m)^CACHED-FILES\t1\tof 2$" out) (re-find #"(?m)^f1-added\tdefn\ta/one.cljk\t3\tone\t$" idx)) (str out idx)))
+    ;; 2) 新 file の追加 → 親 dir の mtime が変わり readdir し直す
+    (write! top "b/three.cljk" "(defn f3 [] 3)\n")
+    (let [{:keys [out]} (run top "build") idx (idx-file)]
+      (check! "new file in a cached dir is found (dir mtime changed)"
+              (and (re-find #"f3\tdefn\tb/three.cljk" idx) (re-find #"(?m)^CACHED-DIRS\t2\tof 3$" out)) (str out idx)))
+    ;; 3) file 削除 → 行が消える
+    (.unlinkSync fs (.join path top "a" "one.cljk"))
+    (let [{:keys [out]} (run top "build") idx (idx-file)]
+      (check! "deleted file's rows disappear" (not (re-find #"one.cljk" idx)) (str out idx)))
+    ;; 4) --full は cache を無視する
+    (let [{:keys [out]} (run top "build" "--full")]
+      (check! "--full ignores the cache" (re-find #"(?m)^CACHED-FILES\t0\tof 2$" out) out))))
+
 (defn test-stale-json []
   (let [top (mk-tmp "json")]
     (write! top "x.cljk" "(defn foo [] 1)\n")
@@ -303,6 +353,8 @@
   (test-build-and-find top git?)
   (test-empty-tree)
   (test-wrong-top)
+  (test-top-is-worktree)
+  (test-incremental)
   (test-no-index-and-root-discovery)
   (test-stale-json))
 

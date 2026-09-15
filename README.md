@@ -9,7 +9,7 @@
 コードを読む前に、この 3 つで済むか試す。全部 1 s 以内・数百 tok。
 
 ```
-find <term>          # どこに在るか。1 hit なら snippet まで出る (往復 1 回)
+find <term>          # どこに在るか。hit ≤3 なら定義の冒頭まで出る (往復 1 回)
 outline <file|ns>    # file を Read する前の地図: 定義の行番号一覧 (実測 18 倍軽い)
 show <ns/sym>        # 定義の前後 3 行。ns で曖昧性を解く
 ```
@@ -81,11 +81,22 @@ build は I/O bound で、この機械の load 次第で 2 倍ぶれる。以後
 「syscall を減らす」以外に lever が無いので、次は query 側の実測 (agent が実際に
 何 tok 使ったか) に戻る。
 
+### iteration 7 (2026-09-15) — 目標を「agent の 1 task」に置き直す
+
+| 仮説 | before | after |
+|---|---|---|
+| incremental build (dir は mtime、file は mtime+size で cache) | full 191.1 / 179.6 s | **warm 85.1 / 104.5 s**、結果は次の full と同一。file 書換 / 追加 / 削除 / `--full` を test で pin |
+| top 自身が linked worktree | iteration 6 の regression: SCANNED 0 で REFUSE | top は worktree 判定の対象外 (test) |
+| `find` が 1 call で答える | Hermes arm C は 8/8 が find → show の 2 call | hit ≤3 なら全 hit の冒頭 (前 1 / 後 6 行) を出す。agent 側の実測は hermes のある機で `bench/hermes_ab.cljk` |
+
+cache は `.kotoba-cache/symbol-index.cache.json`。同一 ms・同一 size の書き換えは
+見えないので、疑わしいときは `build --full`。
+
 ## 使い方 (kbb / nbb / babashka どれでも)
 
 ```bash
 # 索引生成 (1 回。superproject 全体で ~105 s、単 repo なら 1 s)
-bin/symbol-index build [--include-worktrees] [--no-prune]
+bin/symbol-index build [--include-worktrees] [--no-prune] [--full]
 
 # シンボル部分一致検索 (大小無視) → file:line 一覧、exact > prefix > substring
 bin/symbol-index find reconcile
