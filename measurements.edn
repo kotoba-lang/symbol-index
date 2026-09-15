@@ -322,4 +322,14 @@
   :fix "outline の各行に signature (def 行の名前より後ろ = arglist + 本体の頭、無ければ docstring 1 行目、80 字) を添える。--bare で従来形"
   :measured {:outline-kagami-db {:bare-chars 404 :with-signature-chars 1333 :file-chars 7611}
              :note "signature 付きでも file Read の 1/5.7。agent が Read を省くかは未測定 (hermes 無し)"}
-  :verdict :landed}]
+  :verdict :landed}
+
+ ;; ---- iteration 11 (2026-09-15, /loop tick 2) ----
+
+ {:iteration 11 :id :h31-shape-dispatch
+  :date "2026-09-15"
+  :observation "agent は毎回 find / show / outline のどれを呼ぶか決める (think 1 回、外すと往復 1 回)。Hermes 腕 C の run は全て subcommand を正しく選んでいたが、それは skill 本文に 3 つの使い分けが書いてあるから (+1.7k tok/call)"
+  :fix "subcommand 無しの引数を形で dispatch: *.cljk 等 → outline / a.b → outline (ns) / a.b/c → show / それ以外 → find。解釈を 1 行目に印字。未知の bare word は usage error でなく find (0 hit → exit 1)、未知の flag だけ exit 2"
+  :expected "skill 本文の使い分け説明を 1 行に縮められる (call あたりの cached prefix が減る) / 誤った subcommand による往復が消える"
+  :verdict :landed-unmeasured-on-agent
+  :note "測れるのは output の同値性 (test 4 件) まで。agent 側の think / tok は hermes のある機で"}]

@@ -9,6 +9,7 @@
 コードを読む前に、この 3 つで済むか試す。全部 1 s 以内・数百 tok。
 
 ```
+<query>              # subcommand 不要: *.cljk / a.b → outline、a.b/c → show、他 → find (解釈を 1 行目に出す)
 find <term>          # どこに在るか。hit ≤3 なら定義の冒頭まで出る (往復 1 回)
 find <ns>/<term> | --in <path> | --exact   # 多いときの絞り込み (出力が次の 1 手を示す)
 outline <file|ns>    # file を Read する前の地図: 行番号 + signature (arglist / docstring 1 行目)
@@ -121,6 +122,12 @@ hermes の無い機でも測れるように、同じ 8 query で「`find` 1 call
 defn 600 件の実測: arglist が def 行にあるのは 55%、docstring が先なのが 40%。outline の
 各行に「名前より後ろ」(arglist + 本体の頭) か docstring 1 行目を 80 字で添える。
 `outline kagami.db`: 404 → 1,333 chars (file Read 7,611 の 1/5.7)。`--bare` で従来形。
+
+### iteration 11 (2026-09-15) — subcommand を選ばせない
+
+`symbol-index <query>` だけで形から dispatch する (`*.cljk` / `a.b` → outline、`a.b/c` → show、
+他 → find)。解釈は 1 行目に出る。agent が 3 つの使い分けを覚える必要が無くなる分、skill
+本文を縮められる (agent 側の実測は hermes のある機で)。
 
 ## 使い方 (kbb / nbb / babashka どれでも)
 
