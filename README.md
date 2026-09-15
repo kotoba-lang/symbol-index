@@ -63,9 +63,21 @@ bin/symbol-index status
 ```
 
 `build` は `.kotoba-cache/symbol-index.tsv` (v2、gitignore 推奨) に落とす。
-`find` / `show` / `outline` は索引が無ければ自動で build する。top は
-`CLAUDE_PROJECT_DIR` があればそれ、無ければ cwd。索引の top と違う場所から
-引くと REFUSE する (別 tree の答えを返さない)。
+`find` / `show` / `outline` は**索引が無ければ REFUSE する** (exit 2、自動 build
+しない —— iteration 3 で Hermes Agent に導入したとき、agent の terminal が `$HOME`
+に居る状態で呼ばれ、home 全体を build しに行って tool の 120s timeout に当たった
+実測がある)。build は明示の `build` だけ。
+
+top の決め方 (優先順): `SYMBOL_INDEX_ROOT` > `CLAUDE_PROJECT_DIR` > cwd から上へ
+辿って `.kotoba-cache/symbol-index.tsv` を持つ最寄りの dir > cwd。project の
+subdir から呼んでも root の索引を引く。root の外 (例: `$HOME`) から呼ぶときは
+`SYMBOL_INDEX_ROOT=/path/to/root` を付ける。いずれも realpath に揃えてから
+索引 header の top と比べる (macOS の `/var` → `/private/var` で不一致になった)。
+索引の top と違う場所から引くと REFUSE する (別 tree の答えを返さない)。
+
+`bin/symbol-index` は symlink 越し (`ln -s .../bin/symbol-index ~/.local/bin/`)
+でも自分の実体を辿って `scripts/` を見つける (`BASH_SOURCE[0]` は link 側なので、
+辿らないと `~/.local/scripts/` を探して ENOENT になった)。
 
 ## 自己検査
 
