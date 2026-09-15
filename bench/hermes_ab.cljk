@@ -1,0 +1,186 @@
+#!/usr/bin/env kbb
+;; bench/hermes_ab.cljk — Hermes Agent に symbol-index を導入した効果の A/B 実測
+;; (iteration 5, 2026-09-15。結果は measurements.edn の :iteration 5)。
+;;
+;;   kbb --backend sci bench/hermes_ab.cljk <condition> <out.json> [--skills symbol-index] [--only q1,q2]
+;;
+;; condition は結果に刻む label。実測した 4 腕:
+;;   A-baseline   skill 無し・AGENTS.md に symbol-index の記述無し (= 導入前)
+;;   A2-agentsmd  skill 無し・AGENTS.md に「Read の前に索引を引け」の 1 行あり
+;;   B-installed  ~/.hermes/skills に skill を置いただけ (agent が自分で選ぶか)
+;;   C-preloaded  `-s symbol-index` で skill を毎 session 先読み
+;; 1 query = `hermes -z <prompt> --usage-file <f>` を superproject cwd で 1 回。
+;; 計測: usage-file (tokens / cache / api_calls / cost) + 壁時計 + state.db の tool
+;; 呼び出し列 (CLI を実際に呼んだか) + 正解判定 (期待 basename と行番号 ±2、
+;; repo dir 名まで出ていれば :full-path)。
+;; timeout (600s) で殺した run は usage-file が無いので state.db から session を引く。
+;; superproject の場所は HERMES_AB_ROOT で上書きできる。query 表は本機の
+;; superproject 固有 (期待 file:line は grep -n で独立に確かめたもの)。
+
+(require '[clojure.string :as str])
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+(def cp (js/require "node:child_process"))
+(def os (js/require "node:os"))
+
+(def superproject (or (not-empty (.-HERMES_AB_ROOT (.-env js/process)))
+                      "/Users/junkawasaki/github/com-junkawasaki"))
+(def state-db (str (.homedir os) "/.hermes/state.db"))
+(def timeout-ms 600000)
+
+(def queries
+  [{:id "q1" :sym "pin-advance-event"
+    :expect [{:path "orgs/kotoba-lang/kagami/src/kagami/db.cljc" :line 68}]}
+   {:id "q2" :sym "select-quote"
+    :expect [{:path "orgs/network-awai/cloud-murakumo/src/cloud_murakumo/compute_market.cljk" :line 199}]}
+   {:id "q3" :sym "verify-heartbeat"
+    :expect [{:path "orgs/network-awai/cloud-murakumo/src/cloud_murakumo/devices_http.cljk" :line 298}]}
+   {:id "q4" :sym "compile-kernel"
+    :expect [{:path "orgs/kotoba-lang/amu/src/kotoba/compiler/accelerator.cljk" :line 117}]}
+   {:id "q5" :sym "wire-grant"
+    :expect [{:path "orgs/kotoba-lang/amu/src/kotoba/compiler/capability_names.cljk" :line 113}]}
+   {:id "q6" :sym "kernel-base"
+    :expect [{:path "orgs/kotoba-lang/vmm/kotoba/arm64_boot_core.kotoba" :line 41}]}
+   {:id "q7" :sym "write-manifest"
+    :expect [{:path "orgs/kotoba-lang/org-apache-iceberg/src/iceberg/manifest.cljc" :line 98}]}
+   {:id "q8" :sym "capability-catalog" :multi true
+    :expect [{:path "orgs/kotoba-lang/kotoba-sema/src/kotoba/compiler/frontend.cljk" :line 178}
+             {:path "orgs/kotoba-lang/kotoba-component/src/kotoba/component/wasi_contract.clj" :line 62}
+             {:path "orgs/cloud-itonami/cloud-itonami-app/src/cloud/itonami/app/tenant_connection.cljk" :line 20}]}])
+
+(defn prompt-for [{:keys [sym multi]}]
+  (if multi
+    (str "この superproject の中で top-level に `" sym "` という名前で定義されているものを全部挙げて。"
+         "それぞれ file:line 形式で。読んで確かめずに推測で答えないこと。")
+    (str "`" sym "` はこの superproject のどこで定義されている？ "
+         "定義の file:line と、その定義の冒頭 5 行を示して。読んで確かめずに推測で答えないこと。")))
+
+(defn now-ms [] (.now js/Date))
+
+(defn sqlite [sql]
+  (let [r (.spawnSync cp "sqlite3" #js ["-json" state-db sql] #js {:encoding "utf8"})]
+    (if (and (zero? (.-status r)) (seq (str/trim (.-stdout r))))
+      (js->clj (js/JSON.parse (.-stdout r)) :keywordize-keys true)
+      [])))
+
+(defn session-tools
+  "state.db から session の assistant tool_calls を集めて、tool 名の頻度と
+  symbol-index を呼んだ回数を返す。"
+  [sid]
+  (let [rows (sqlite (str "select tool_calls from messages where session_id='" sid
+                          "' and role='assistant' and tool_calls is not null"))
+        calls (mapcat (fn [{:keys [tool_calls]}]
+                        (try (js->clj (js/JSON.parse tool_calls) :keywordize-keys true)
+                             (catch :default _ [])))
+                      rows)
+        names (map #(get-in % [:function :name]) calls)
+        args  (map #(str (get-in % [:function :arguments])) calls)
+        ;; CLI を実際に呼んだ回数。cache file (.tsv) を grep しただけの call は数えない
+        ;; (baseline の agent が .kotoba-cache/symbol-index.tsv を直接 grep した実測)。
+        cli-re #"symbol-index(?:\.cljk)?\s+(?:build|find|show|outline|status)"]
+    {:tool-calls (count calls)
+     :by-tool (frequencies names)
+     :symbol-index-calls (count (filter #(re-find cli-re %) args))
+     :file-reads (count (filter #(#{"read_file"} %) names))}))
+
+(defn session-row [sid]
+  (first (sqlite (str "select id, input_tokens, output_tokens, api_call_count, tool_call_count, "
+                      "estimated_cost_usd, started_at, ended_at, end_reason from sessions where id='" sid "'"))))
+
+(defn latest-cli-session-since [t-sec]
+  (:id (first (sqlite (str "select id from sessions where source='cli' and started_at >= " t-sec
+                           " order by started_at desc limit 1")))))
+
+(defn line-near? [text line]
+  (let [nums (map js/parseInt (re-seq #"\d+" text))]
+    (boolean (some #(<= (Math/abs (- % line)) 2) nums))))
+
+(defn grade [answer expect]
+  (let [hits (for [{p :path line :line} expect
+                   :let [base (.basename path p)
+                         repo (nth (str/split p #"/") 2)
+                         base-ok (str/includes? answer base)
+                         ;; 行番号は basename の直後 200 字で見る (別 hit の数字を拾わない)
+                         idx (.indexOf answer base)
+                         near (if (neg? idx) "" (subs answer idx (min (count answer) (+ idx 200))))
+                         line-ok (and base-ok (line-near? near line))
+                         repo-ok (str/includes? answer repo)]]
+               {:path p :base-ok base-ok :line-ok line-ok :repo-ok repo-ok})]
+    ;; correct = basename + 行番号 ±2 (全 hit)。full-path はさらに repo dir 名も出ている。
+    {:hits hits
+     :correct (every? :line-ok hits)
+     :full-path (every? #(and (:line-ok %) (:repo-ok %)) hits)
+     :path-only (and (every? :base-ok hits) (not (every? :line-ok hits)))}))
+
+(defn run-one [{:keys [id] :as q} {:keys [condition skills out-dir]}]
+  (let [usage-file (.join path out-dir (str condition "-" id "-usage.json"))
+        args (cond-> ["-z" (prompt-for q) "--usage-file" usage-file]
+               (seq skills) (into ["-s" (str/join "," skills)]))
+        t0 (now-ms)
+        t0-sec (/ t0 1000)
+        r (.spawnSync cp "hermes" (clj->js args)
+                      #js {:cwd superproject :encoding "utf8" :timeout timeout-ms
+                           :maxBuffer (* 64 1024 1024)
+                           :env (.-env js/process)})
+        elapsed (/ (- (now-ms) t0) 1000)
+        timed-out? (some? (.-signal r))
+        usage (when (.existsSync fs usage-file)
+                (js->clj (js/JSON.parse (.readFileSync fs usage-file "utf8")) :keywordize-keys true))
+        sid (or (:session_id usage) (latest-cli-session-since (- t0-sec 1)))
+        row (when sid (session-row sid))
+        tools (when sid (session-tools sid))
+        answer (str (.-stdout r))
+        g (grade answer (:expect q))]
+    (.writeFileSync fs (.join path out-dir (str condition "-" id "-answer.txt")) answer)
+    (merge {:condition condition :id id :sym (:sym q)
+            :elapsed-s elapsed :timed-out timed-out? :exit (.-status r)
+            :session-id sid
+            :input-tokens (or (:input_tokens usage) (:input_tokens row))
+            ;; input_tokens は cache hit 分を含まない。context 消費は cache-read を足した total で見る。
+            :cache-read-tokens (or (:cache_read_tokens usage) (:cache_read_tokens row) 0)
+            :total-tokens (or (:total_tokens usage)
+                              (+ (or (:input_tokens row) 0) (or (:cache_read_tokens row) 0) (or (:output_tokens row) 0)))
+            :output-tokens (or (:output_tokens usage) (:output_tokens row))
+            :api-calls (or (:api_calls usage) (:api_call_count row))
+            :cost-usd (or (:estimated_cost_usd usage) (:estimated_cost_usd row))
+            :answer-chars (count answer)}
+           tools
+           (select-keys g [:correct :full-path :path-only :hits]))))
+
+(defn parse-args [argv]
+  (loop [a argv m {:skills [] :only nil}]
+    (cond
+      (empty? a) m
+      (= "--skills" (first a)) (recur (nnext a) (update m :skills conj (second a)))
+      (= "--only" (first a)) (recur (nnext a) (assoc m :only (set (str/split (second a) #","))))
+      (nil? (:condition m)) (recur (next a) (assoc m :condition (first a)))
+      (nil? (:out m)) (recur (next a) (assoc m :out (first a)))
+      :else (recur (next a) m))))
+
+(let [argv (vec (drop 1 (rest (.-argv js/process))))
+      argv (if (str/ends-with? (first argv "") ".cljk") (vec (rest argv)) argv)
+      {:keys [condition out skills only]} (parse-args argv)]
+  (when-not (and condition out)
+    (println "usage: hermes_ab.cljk <condition> <out.json> [--skills NAME]... [--only q1,q2]")
+    (.exit js/process 2))
+  (let [out-dir (.dirname path out)
+        qs (if only (filter #(only (:id %)) queries) queries)
+        results (doall
+                 (for [q qs]
+                   (let [r (run-one q {:condition condition :skills skills :out-dir out-dir})]
+                     ;; 途中で殺されても query 単位の結果が残るよう JSONL に追記する
+                     (.appendFileSync fs (str out ".jsonl") (str (js/JSON.stringify (clj->js r)) "\n"))
+                     (println (str condition " " (:id q) " " (:sym q)
+                                   " → " (if (:correct r) "OK" (if (:path-only r) "PATH-ONLY" "MISS"))
+                                   " total=" (:total-tokens r) " in=" (:input-tokens r) " out=" (:output-tokens r)
+                                   " calls=" (:api-calls r) " tools=" (:tool-calls r)
+                                   " si=" (:symbol-index-calls r)
+                                   " t=" (.toFixed (:elapsed-s r) 0) "s"
+                                   (when (:timed-out r) " TIMEOUT")))
+                     r)))]
+    (.writeFileSync fs out (js/JSON.stringify (clj->js results) nil 2))
+    (println "RAN\t" (count results) "\t" out)
+    (when (zero? (count results))
+      (println "no queries ran (--only matched nothing?)")
+      (.exit js/process 2))))
