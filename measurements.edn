@@ -1,0 +1,92 @@
+;; symbol-index の実測台帳 (append-only)。iteration ごとに上書きせず追記する。
+;; 数値の横に測定日と再現手順を置く。推定値は書かない。
+;; 読み方: 1 entry = 1 仮説。:before / :after は同一 corpus・同一 query で取る。
+[{:iteration 1
+  :date "2026-09-15"
+  :hypothesis "code 理解の cost は full-file read に支配されている"
+  :method "agent log 767 API call を 1 call ごとに token 集計、file read を伴う query の分布"
+  :before {:tokens-per-query-mean 6580 :tokens-per-query-p50 2212}
+  :after {:tokens-per-query-mean 122}
+  :ratio 54
+  :verdict :landed
+  :commit "7ccc48e"}
+
+ ;; ---- iteration 2 (2026-09-15, Co-Scientist: 観測 → 仮説 → A/B → 着地 → 反証) ----
+ ;; corpus: superproject root (west 管理 orgs/ 含む)、kbb --backend sci、Apple Silicon。
+ ;; 再現: cd <superproject>; kbb --backend sci scripts/symbol-index.cljk build;
+ ;;       /usr/bin/time -p kbb --backend sci scripts/symbol-index.cljk find apply-pin-advance
+
+ {:iteration 2 :id :h1-canonical-path
+  :date "2026-09-15"
+  :observation "find apply-pin-advance の hit が worktrees/kotoba-lang/kagami/... の 1 件のみ。正本 orgs/kotoba-lang/kagami/src/kagami/db.cljk が索引に無い"
+  :cause "walk が symlink 側の path を返し、visited(realpath) が正本側を『訪問済み』で捨てた (readdir 順で worktrees/ が先)"
+  :fix "file の path を realpath 相対にし、file 単位でも realpath で dedupe"
+  :before {:hit-path "worktrees/kotoba-lang/kagami/src/kagami/db.cljk" :symbols-under-worktrees 305436}
+  :after {:hit-path "orgs/kotoba-lang/kagami/src/kagami/db.cljk" :symbols-under-worktrees 0}
+  :verdict :landed}
+
+ {:iteration 2 :id :h2-metadata-as-name
+  :date "2026-09-15"
+  :observation "sym が ^ で始まる entry 38,894 件 (5.0%)。内訳 ^:private 32,930 / ^:dynamic 2,169 / ^:const 1,401 / ^{:doc 453"
+  :fix "def-form-re が名前の前の ^:kw / ^{...} / ^Tag を読み飛ばす"
+  :before {:caret-names 38894}
+  :after {:caret-names 0}
+  :verdict :landed}
+
+ {:iteration 2 :id :h3-query-latency
+  :date "2026-09-15"
+  :observation "find / show が毎回 108 MB JSON を parse し 780K map を js->clj する"
+  :fix "TSV v2 + native RegExp 走査。SCI の per-line loop を回さない"
+  :before {:find-wall-s 5.85 :show-wall-s 5.18 :index-bytes 108449364 :symbols 779522}
+  :after {:find-wall-s 0.76 :show-wall-s 0.64 :index-bytes 73854996 :symbols 612791
+          :find-wall-s-samples [0.73 0.76 0.78]}
+  :ratio 7.7
+  :note "kbb 起動が 0.49 s なので下限はそこ"
+  :verdict :landed}
+
+ {:iteration 2 :id :h4-stale-claim
+  :date "2026-09-15"
+  :observation "header comment に『stale 判定は行数 + 最新 mtime』とあるが index-stale? はどこからも呼ばれない dead code"
+  :fix "虚偽の claim を消し、status コマンドで built-at / age / scanned / symbols を見せる。find/show は 24 h 超で 1 行警告 (自動 rebuild はしない)"
+  :verdict :landed}
+
+ {:iteration 2 :id :h5-exit-semantics
+  :date "2026-09-15"
+  :observation "0 symbols の索引でも find は『0 hits』exit 0。空 tree の build も exit 0 で空索引を書く (8 問の Q1/Q4)"
+  :fix "exit 0 = hit / 1 = 測って 0 件 / 2 = 拒否。scanned 0 の build は REFUSE、top 不一致・旧形式・0 symbols も REFUSE"
+  :verdict :landed}
+
+ {:iteration 2 :id :h6-worktree-and-generated-noise
+  :date "2026-09-15"
+  :observation "linked worktree (_wt-* / .claude/worktrees/*) と gitignore された生成物 dir (runs/ 32,025 / verify-runs/ 27,492 symbol) が索引に載る"
+  :fix "gitfile が /worktrees/ を指す dir は skip (--include-worktrees で戻す)。top 直下の gitignored かつ .git 無しの dir は skip"
+  :measured {:check-ignore-depth-1-s 0.85 :check-ignore-depth-2-s 29.9 :decision "depth 1 のみ"}
+  :after {:skipped-worktrees 34 :skipped-gitignored 22 :scanned 51594}
+  :verdict :landed}
+
+ {:iteration 2 :id :h7-nested-defs
+  :date "2026-09-15"
+  :observation "行頭 `#?(:clj (defn` 1,347 行、indent 1-3 の def 3,393 行、indent 4+ 2,279 行 (rg --no-ignore、orgs/)"
+  :fix "行頭 reader-cond と indent ≤3 を nested (~) として索引、rank は top-level の後。indent 4+ は test 文字列内 code が多いので取らない"
+  :after {:nested-rows 6933}
+  :verdict :landed}
+
+ {:iteration 2 :id :h8-fewer-round-trips
+  :date "2026-09-15"
+  :observation "agent が file を Read する前に構造を知る手段が無い。find → show の 2 往復も 1 hit のときは無駄"
+  :fix "outline <file|ns> (定義一覧) を追加。find が 1 hit なら snippet まで出す"
+  :measured {:outline-kagami-db-chars 423 :file-chars 7611 :ratio 18 :outline-wall-s 1.37}
+  :verdict :landed}
+
+ {:iteration 2 :id :h9-self-check
+  :date "2026-09-15"
+  :observation "test が無い。緑は劇場"
+  :fix "test/symbol_index_test.cljk: fixture tree を tmp に作り script を子プロセスで実行、32 check、REFUSE literal を pin"
+  :falsified-by "壊したコピー 3 種で赤を確認: metadata regex 除去 → 2 FAIL / scanned-0 refuse 除去 → 2 FAIL / worktree skip 除去 → 3 FAIL (いずれも壊した経路の check だけが落ちる)"
+  :verdict :landed}
+
+ {:iteration 2 :id :build-time
+  :date "2026-09-15"
+  :measured {:build-wall-s 105.6 :scanned 51594 :symbols 612791}
+  :note "iteration 1 の build 時間は未測定。walk の sys time 37 s が支配的 (statSync + realpathSync × 5 万)。次の仮説候補: readdirSync withFileTypes で stat を減らす"
+  :verdict :measured-only}]
