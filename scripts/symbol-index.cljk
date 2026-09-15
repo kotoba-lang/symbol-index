@@ -1,0 +1,233 @@
+#!/usr/bin/env kbb
+;; シンボル索引: .cljk / .cljc / .cljs / .clj / .kotoba を走査し、
+;; (def...) / (ns...) の top-level form に現れるシンボルから
+;; 「シンボル → file:line」の索引を作る。
+;;
+;; なぜ必要か。2026-09-15 の Co-Scientist iteration (対話 ID
+;; 20260915_134652) で実測した:
+;;
+;;   * コード理解のための full-file read は 1 query あたり平均 ~6,580 tok
+;;     (p50 2,212 tok)。シンボル位置 + 前後 3 行の snippet なら平均 ~122 tok。
+;;     **54 倍の差**。hyakka/catalog.cljk (1.28M tok) のような file を
+;;     full read すると context が破綻する。
+;;   * superproject root の `git grep` は子 repo (gitlink) を 1 件も引かない
+;;     (実測 0 hit)。rg なら 424 MB 走査が 3.6s。
+;;
+;; そこで: **「コードを読む」前に、これを引く。**
+;;
+;;   kbb --backend sci scripts/symbol-index.cljk build          # 索引生成
+;;   kbb --backend sci scripts/symbol-index.cljk find reconcile  # シンボル検索
+;;   kbb --backend sci scripts/symbol-index.cljk show kagami.db/apply-pin-advance
+;;                                                              # 定義の snippet 表示
+;;
+;; 索引は .kotoba-cache/symbol-index.json に落ちる (gitignore 済みの
+;; cache dir 規約に合わせる)。stale 判定は行数 + 最新 mtime の比較。
+;; 完全一致で無い時は部分一致も出す。「無い」と結論する前に find を引く。
+
+(require '[clojure.string :as str])
+
+(def fs (js/require "node:fs"))
+(def path (js/require "node:path"))
+
+(def top
+  (or (.-CLAUDE_PROJECT_DIR (.-env js/process))
+      (.cwd js/process)))
+
+(def index-dir ".kotoba-cache")
+(def index-file "symbol-index.json")
+
+(def ^:private scan-exts #{".cljk" ".cljc" ".cljs" ".clj" ".kotoba"})
+(def ^:private skip-dirs #{".git" "node_modules" ".west" "target" ".cpcache" ".lsp" ".clj-kondo"})
+(def ^:private max-file-bytes (* 4 1024 1024))
+
+(def def-form-re
+  "行頭から始まる top-level 定義 form。sexp parser を持ち込まない代わりに、
+  この家系の codebase は top-level def を行頭に置く規約で書かれている。"
+  #"^\((defn|defn-|def|defonce|defmacro|defmulti|defmethod|defprotocol|defrecord|deftype|ns|deftest)\s+(\S+)")
+
+(defn- walk
+  "dir 配下の走査対象 file を相対 path で返す。west の子 repo は symlink
+  checkout なので symlink の **指先** を辿る (statSync)。visited set で
+  symlink loop を断つ。⚠ Node Stats の isFile/isDirectory は method —
+  (.-isFile stat) は関数が返るだけで真偽にならない。"
+  [dir]
+  (let [out (volatile! [])
+        visited (volatile! #{})]
+    (loop [dirs [dir]]
+      (if-let [d (first dirs)]
+        (let [real (try (.realpathSync fs d) (catch :default _ d))
+              next-dirs (volatile! (rest dirs))]
+          (when-not (contains? @visited real)
+            (vswap! visited conj real)
+            (doseq [name (.readdirSync fs d)]
+              (if (contains? skip-dirs name)
+                nil
+                (let [full (.join path d name)
+                      stat (try (.statSync fs full) (catch :default _ nil))]
+                  (cond
+                    (nil? stat) nil
+                    (and (.isFile stat) (contains? scan-exts (.extname path name)))
+                    (vswap! out conj full)
+                    (.isDirectory stat) (vswap! next-dirs conj full)
+                    :else nil)))))
+          (recur @next-dirs))
+        :done))
+    @out))
+
+(defn- build-index
+  "全対象 file から [{sym file line kind}] を作る。walk は絶対 path を返すので
+  file 名の表示用に top で始まる相対 path へ縮める。"
+  []
+  (let [files (walk top)
+        out (volatile! [])]
+    (doseq [full files]
+      (let [rel (if (str/starts-with? full top)
+                  (subs full (inc (count top)))
+                  full)]
+        (try
+          (when (<= (.-size (.statSync fs full)) max-file-bytes)
+            (let [text (.readFileSync fs full "utf8")]
+              (doseq [[i line] (map-indexed vector (str/split-lines text))]
+                (when-let [m (re-find def-form-re line)]
+                  (vswap! out conj {:sym (nth m 2)
+                                    :kind (nth m 1)
+                                    :file rel
+                                    :line (inc i)})))))
+          (catch :default _ nil))))
+    @out))
+
+(defn- index-stale?
+  [meta]
+  (let [idx-path (.join path top index-dir index-file)]
+    (or (not (.existsSync fs idx-path))
+        (try
+          (let [saved (js->clj (.parse js/JSON (.readFileSync fs idx-path "utf8")) :keywordize-keys true)
+                now (.getTime (js/Date.))]
+            (or (not= (count (:files saved)) (:files meta))
+                (not= (:built-at saved) nil) false))
+          (catch :default true)))))
+
+(defn- write-index
+  [syms]
+  (let [dir (.join path top index-dir)]
+    (when-not (.existsSync fs dir)
+      (.mkdirSync fs dir #js{:recursive true}))
+    (.writeFileSync fs (.join path dir index-file)
+                    (.stringify js/JSON (clj->js {:built-at (.toISOString (js/Date.))
+                                                  :count (count syms)
+                                                  :symbols syms}))
+                    "utf8")))
+
+(defn- load-index
+  "索引を返す。無ければ build してから返す。"
+  []
+  (let [idx-path (.join path top index-dir index-file)]
+    (if (.existsSync fs idx-path)
+      (try
+        (let [saved (js->clj (.parse js/JSON (.readFileSync fs idx-path "utf8")) :keywordize-keys true)]
+          (mapv #(select-keys % [:sym :kind :file :line]) (:symbols saved)))
+        (catch :default
+            (do (println "index unreadable — rebuilding...")
+                (let [syms (build-index)]
+                  (write-index syms)
+                  syms))))
+      (do (println "index not found — building first...")
+          (let [syms (build-index)]
+            (write-index syms)
+            (println (str "indexed " (count syms) " symbols"))
+            syms)))))
+
+(defn- snippet
+  "file の line から前後 ctx 行を返す。"
+  [file line & [ctx]]
+  (let [ctx (or ctx 3)
+        full (.join path top file)]
+    (try
+      (let [lines (str/split-lines (.readFileSync fs full "utf8"))
+            from (max 0 (- line (inc ctx)))
+            to (min (count lines) (+ line ctx))]
+        (str/join "\n" (map #(str "  " (inc %) "| " (nth lines %))
+                            (range from to))))
+      (catch :default _ "  (unreadable)"))))
+
+(defn- fmt-hit
+  [{:keys [sym kind file line]}]
+  (str "  " kind " " sym " — " file ":" line))
+
+(defn- cmd-find
+  [terms]
+  (let [syms (load-index)
+        lower (map str/lower-case terms)
+        hits (filter (fn [{:keys [sym]}]
+                       (let [s (str/lower-case sym)]
+                         (some #(str/includes? s %) lower)))
+                     syms)]
+    (println (str "indexed " (count syms) " symbols, " (count hits) " hits for "
+                  (str/join " " terms)))
+    (doseq [h (take 40 hits)]
+      (println (fmt-hit h)))
+    (when (> (count hits) 40)
+      (println (str "  ... " (- (count hits) 40) " more (narrow the term)")))))
+
+(defn- cmd-show
+  [target]
+  (let [[sym-part] (str/split target #":")
+        syms (load-index)
+        ;; "ns/sym" の場合は末尾セグメントで絞る
+        leaf (last (str/split sym-part #"/"))
+        hits (filter #(= (:sym %) sym-part) syms)
+        hits (if (seq hits) hits (filter #(= (:sym %) leaf) syms))]
+    (if (empty? hits)
+      (do (println (str "no exact match for " target " — try: find " leaf))
+          2)
+      (do
+        (doseq [{:keys [file line sym kind]} (take 3 hits)]
+          (println (str "== " kind " " sym " — " file ":" line))
+          (println (snippet file line)))
+        0))))
+
+(defn- script-args
+  "nbb / kbb どちらでも *command-line-args* が空のことがあるため
+  gen-west-manifest.cljs / repo-search.cljk と同じ復元を行う。"
+  []
+  (if (seq *command-line-args*)
+    *command-line-args*
+    (let [argv (vec (js->clj (.-argv js/process)))
+          index (first (keep-indexed
+                        (fn [i value]
+                          (when (str/ends-with? value "scripts/symbol-index.cljk") i))
+                        argv))]
+      (if (some? index) (subvec argv (inc index)) []))))
+
+(defn -main [& args]
+  (let [[cmd & rest-args] args]
+    (cond
+      (= cmd "build")
+      (let [syms (build-index)]
+        (write-index syms)
+        (println (str "indexed " (count syms) " symbols -> " index-dir "/" index-file)))
+
+      (= cmd "find")
+      (if (empty? rest-args)
+        (do (println "usage: symbol-index.cljk find <term> [term...]") 2)
+        (cmd-find rest-args))
+
+      (= cmd "show")
+      (if (empty? rest-args)
+        (do (println "usage: symbol-index.cljk show <symbol>  (e.g. kagami.db/apply-pin-advance)") 2)
+        (cmd-show (first rest-args)))
+
+      :else
+      (do (println "usage: kbb --backend sci scripts/symbol-index.cljk build|find|show [args]")
+          (println "  build — scan .cljk/.cljc/.cljs/.clj/.kotoba and write the index")
+          (println "  find <term> — substring search over symbol names")
+          (println "  show <symbol> — definition snippet (file:line + context lines)")
+          2))))
+
+(let [args (script-args)]
+  (if (seq args)
+    (let [code (apply -main args)]
+      (when-not (and (number? code) (zero? code))
+        (.exit js/process (if (number? code) code 0))))
+    (do (println "usage: kbb --backend sci scripts/symbol-index.cljk build|find|show [args]")
+        (.exit js/process 2))))

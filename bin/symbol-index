@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# symbol-index launcher: kbb > nbb > bb, first available wins.
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT="$DIR/scripts/symbol-index.cljk"
+if command -v kbb >/dev/null 2>&1; then
+  exec kbb --backend sci "$SCRIPT" "$@"
+elif command -v nbb >/dev/null 2>&1; then
+  exec nbb "$SCRIPT" "$@"
+elif command -v bb >/dev/null 2>&1; then
+  exec bb "$SCRIPT" "$@"
+else
+  echo "symbol-index: no kbb / nbb / bb on PATH" >&2
+  exit 64
+fi
