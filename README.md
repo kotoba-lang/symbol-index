@@ -104,6 +104,15 @@ subdir から呼んでも root の索引を引く。root の外 (例: `$HOME`) �
 でも自分の実体を辿って `scripts/` を見つける (`BASH_SOURCE[0]` は link 側なので、
 辿らないと `~/.local/scripts/` を探して ENOENT になった)。
 
+## Hermes Agent への導入 (iteration 5)
+
+skill は `~/.hermes/skills/software-development/symbol-index/SKILL.md` (user-local)、
+実行体は `~/.local/share/kotoba-lang/symbol-index` を `~/.local/bin/symbol-index` に
+symlink。A/B の実測は `bench/hermes_ab.cljk` と `measurements.edn` の `:iteration 5`:
+skill を**先読み** (`hermes chat -s symbol-index` / cron job の `skills:`) すると
+8/8 正解・token 2.7 分の 1・API call 2.5 分の 1・壁時計 10 分の 1。**置くだけ**では
+agent が選ぶのは 2/8 —— 導入 = 先読みまで。
+
 ## 自己検査
 
 ```bash

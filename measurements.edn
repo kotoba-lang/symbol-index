@@ -162,4 +162,43 @@
   :observation ".venv 系が 2,391 + 385 dir"
   :fix "pyvenv.cfg を持つ dir は歩かない (itonami-maturity-scan と同じ、名前でなく標準ファイル)"
   :after {:skipped-venvs 8}
+  :verdict :landed}
+ ;; ---- iteration 5 (2026-09-15, Hermes Agent v0.21.3 への導入と A/B 実測。iteration 3/4 と並行して別 session で測った) ----
+ ;; corpus: superproject root、model z-ai/glm-5.3-flash (openrouter、Hermes の既定)、
+ ;; 8 query (symbol の定義場所を問う。q8 は同名 3 定義の列挙)、各腕 n=8。
+ ;; 再現: kbb --backend sci bench/hermes_ab.cljk <腕> out.json [--skills symbol-index]
+ ;;       生データ bench/results/2026-09-15-{A,A2,B,C}.jsonl。
+ ;; 注意: B と C は並走させたので壁時計は A/A2 より contention を含む。token / api 数は影響なし。
+
+ {:iteration 5 :id :h16-launcher-symlink
+  :date "2026-09-15"
+  :observation "ln -s bin/symbol-index ~/.local/bin/ で入れると ENOENT (~/.local/scripts/symbol-index.cljk)。BASH_SOURCE[0] が link 側"
+  :fix "launcher が link chain を辿ってから dirname"
+  :verdict :landed :commit "391707c"}
+
+ {:iteration 5 :id :h17-home-cwd-autobuild
+  :date "2026-09-15"
+  :observation "Hermes の terminal tool は $HOME で始まる (pwd 実測)。find/show の自動 build が home 全体を走査し、tool の 120s timeout に当たった (baseline q1 session 20260915_172637_cf6745)"
+  :fix "索引が無ければ REFUSE exit 2 (build を代行しない)。top は SYMBOL_INDEX_ROOT > CLAUDE_PROJECT_DIR > cwd から上へ辿って索引を持つ dir > cwd、realpath に揃える"
+  :measured {:refuse-from-home-wall-s 0.17}
+  :falsified-by "壊したコピー 2 種 (auto-build 復活 / walk-up+env 除去) でそれぞれ該当 2 check だけが赤。CHECKS 36 / FAILED 0"
+  :verdict :landed :commit "391707c"}
+
+ {:iteration 5 :id :h18-hermes-ab
+  :date "2026-09-15"
+  :hypothesis "Hermes Agent に skill として導入すると、symbol 定義の lookup が安く・正しくなる"
+  :method "hermes -z 1 query = 1 session、--usage-file と state.db から集計。正解 = 期待 basename + 行番号 ±2 (grep -n で独立検証済み)"
+  :arms
+  {:A-baseline  {:n 8 :correct 4 :total-tok-mean 139488 :uncached-in-mean 45469 :out-mean 1747 :api-mean 7.4 :tool-calls-mean 7.0 :cli-used 0 :wall-s-mean 254 :wall-s-median 177 :cost-usd 0.0837}
+   :A2-agentsmd {:n 8 :correct 5 :total-tok-mean 108539 :uncached-in-mean 35969 :out-mean 850  :api-mean 5.8 :tool-calls-mean 5.1 :cli-used 0 :wall-s-mean 142 :wall-s-median 124 :cost-usd 0.0638}
+   :B-installed {:n 8 :correct 4 :total-tok-mean 86899  :uncached-in-mean 22046 :out-mean 660  :api-mean 5.0 :tool-calls-mean 4.5 :cli-used 2 :wall-s-mean 106 :wall-s-median 73  :cost-usd 0.0445}
+   :C-preloaded {:n 8 :correct 8 :total-tok-mean 50740  :uncached-in-mean 6204  :out-mean 288  :api-mean 3.0 :tool-calls-mean 2.0 :cli-used 8 :wall-s-mean 26  :wall-s-median 22  :cost-usd 0.0192}}
+  :ratios-C-vs-A {:total-tok 2.7 :uncached-in 7.3 :api-calls 2.5 :wall 9.8 :cost 4.4 :correct "4/8 → 8/8"}
+  :findings
+  ["baseline の誤答は 4 件とも『定義は存在しない』型の false negative: search_files と rg (gitignore 尊重) は orgs/ 配下の west 子 repo を見ない (search_files は『hidden or gitignored に N 件』と警告する)。索引は見る"
+   "AGENTS.md の 1 行 (A2) は CLI 呼び出しを 0/8 しか生まなかった。改善分 (139k→109k tok) は .kotoba-cache/symbol-index.tsv を agent が直接 grep したことによる"
+   "skill を置くだけ (B) では agent が skill を選ぶのは 2/8。選んだのは workspace-search skill を見に行った回だけ (2/2 が step 0 の pointer に従って正解)。symbol-index skill 自体を skill_view した run は 0"
+   "先読み (C) は 8/8 正解、毎 run CLI を 1-2 回呼んで終了。skill 本文は 1 call あたり +1.7k tok (16.9k vs 15.2k)"
+   "Hermes は cwd の AGENTS.md と CLAUDE.md を両方注入する。この superproject では両者がほぼ同文なので 1 call の床が ~15k tok になっている (本 iteration の対象外、記録のみ)"]
+  :decision "導入は『skill を置く』だけでは足りない。code を触る cron job には skills: [symbol-index] を付け、対話は hermes chat -s symbol-index。workspace-search skill の step 0 に pointer を置いた (それを見に行った run は従う)"
   :verdict :landed}]
