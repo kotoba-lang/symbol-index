@@ -360,4 +360,24 @@
              :grep-33MB {:absent {:kotoba 0.13 :grep-F 0.15 :rg-F 0.00} :matches-26400 {:kotoba 0.17 :grep-F 0.17} :matches-598400 {:kotoba 0.47 :grep-F 0.16 :rg-F 0.06}}
              :host-search-in-find "scan-to を host search に替えた版: 857K entry で user 1.56 → 1.60 s、差なし (名前が短い)。着地せず"}
   :verdict :partially-cleared
-  :reason "trap と速度の 2 理由は消えた: root corpus 規模 (857K entry) を 1 thread で /usr/bin/find の半分の CPU で歩く。残る理由は式 (-prune / -name) が無いこと。walk の wall (49 s vs SCI walk 121 s、ただし別日・別 load) は 1 thread の I/O 直列化で、fd の 7.4 s は並列 walk の分。symbol-index が find を採るには (1) -prune 相当 (2) 出力の parse cost の実測 が要る。再評価条件を『-prune 相当が入ったとき』に更新"}]
+  :reason "trap と速度の 2 理由は消えた: root corpus 規模 (857K entry) を 1 thread で /usr/bin/find の半分の CPU で歩く。残る理由は式 (-prune / -name) が無いこと。walk の wall (49 s vs SCI walk 121 s、ただし別日・別 load) は 1 thread の I/O 直列化で、fd の 7.4 s は並列 walk の分。symbol-index が find を採るには (1) -prune 相当 (2) 出力の parse cost の実測 が要る。再評価条件を『-prune 相当が入ったとき』に更新"}
+
+ ;; ---- iteration 13 (2026-09-15, /loop tick 4) — 仮説が尽きたので測定を固定して止める ----
+
+ {:iteration 13 :id :fixpoint
+  :date "2026-09-15"
+  :local-metrics {:tests "76 checks / 0 failed"
+                  :one-call-bench {:correct "8/8" :opening "8/8" :chars-mean 1147 :chars-max 2152
+                                   :results "bench/results/2026-09-15-one-call-iter12.jsonl"}
+                  :root-index {:scanned 51602 :symbols 613286 :pruned-groups 11 :cached-files 51327 :age-minutes 125}}
+  :unmeasured-on-agent
+  ;; この機には hermes が無い。hermes のある機で bench/hermes_ab.cljk を腕 D (現 main、skill 先読み)
+  ;; として回し、腕 C (:h18) と比べる。見るもの: by-tool の 2 call 目が消えるか / correct 8/8 が
+  ;; 保たれるか / total-tok と wall。
+  [{:id :h24 :claim "find が hit ≤3 (exact) の冒頭を出すので find → show の 2 call 目が消える" :proxy "one_call opening 8/8"}
+   {:id :h26 :claim "0 hit の near 提案で『定義は無い』型の false negative が減る" :proxy "test 2 件、agent 側は未測定"}
+   {:id :h30 :claim "outline の signature で Read が減る" :proxy "chars 404 → 1,333 (file の 1/5.7)"}
+   {:id :h31 :claim "subcommand 無しの dispatch で think 1 回と誤 subcommand の往復が消える" :proxy "test 4 件"}
+   {:id :h32 :claim "編集直後の file でも行番号が合う (精度)" :proxy "test 5 件、stale 率 0.10%/1.6h"}]
+  :stopped-because "出力形・鮮度・build の lever は着地済み。残る仮説は agent 側の実測が要る。捏造した仮説で tick を埋めない"
+  :verdict :measured-only}]
