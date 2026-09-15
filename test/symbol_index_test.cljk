@@ -219,6 +219,25 @@
   (let [{:keys [code out]} (run top "find" "-")]
     (check! "find with more than 3 hits prints no snippets"
             (and (= 0 code) (not (re-find #"(?m)^  \d+\| " out))) out))
+  (let [{:keys [code out]} (run top "find" "b.core/same-name")]
+    (check! "find ns/term filters by the ns column"
+            (and (= 0 code) (re-find #"1 hits for b.core/same-name" out) (re-find #"orgs/b/src" out) (not (re-find #"orgs/a/src" out))) out))
+  (let [{:keys [code out]} (run top "find" "same-name" "--in" "orgs/a/")]
+    (check! "find --in filters by path substring"
+            (and (= 0 code) (re-find #"1 hits for same-name --in orgs/a/" out) (not (re-find #"orgs/b/src" out))) out))
+  (let [{:keys [code out]} (run top "find" "same" "--exact")]
+    (check! "find --exact needs the whole name (0 hits for a fragment)"
+            (and (= 1 code) (re-find #"0 hits for same --exact" out)) out))
+  (let [{:keys [code out]} (run top "find" "pad")]
+    (check! "wide hits: summary by repo + 8 ranked rows, not a 40-row dump"
+            (and (= 0 code) (re-find #"too many to list: \d+ exact" out) (re-find #"(?m)^  \d+\tedge.cljk|^  \d+\t$" out)
+                 (= 8 (count (re-seq #"(?m)^  def pad — " out)))) out))
+  (let [{:keys [code out]} (run top "find" "hidden-fx")]
+    (check! "0 hits: near suggestions by fragment (false negative guard)"
+            (and (= 1 code) (re-find #"(?m)^  near \(by fragment [^)]*\): [^\n]*hidden-fn" out)) out))
+  (let [{:keys [code out]} (run top "find" "hidden-fx" "--in" "orgs/b/")]
+    (check! "0 hits with --in: suggestions respect the filter (none leak from orgs/a)"
+            (and (= 1 code) (not (re-find #"hidden-fn" out))) out))
   (let [{:keys [code out]} (run top "outline" "b/core.cljc")]
     (check! "outline by file suffix lists defs in line order"
             (and (= 0 code) (re-find #"(?m)^== orgs/b/src/b/core.cljc\n  1\tns b.core\n  2\tdefn same-name$" out)) out))
