@@ -119,6 +119,8 @@
           (str "(ns b.core)\n"
                "(defn same-name [] :b)\n"))
   ;; exact 1 件 + substring 3 件: exact の snippet だけ出る
+  (write! top "orgs/a/src/a/wide.cljk"
+          (str "(ns a.wide)\n" (apply str (for [i (range 45)] (str "(defn wide-" i " [] " i ")\n")))))
   (write! top "orgs/a/src/a/more.cljk"
           (str "(ns a.more)\n(defn hidden-fn-more [] 1)\n(defn hidden-fn-most [] 1)\n(defn hidden-fn-x [] 1)\n"
                "(defn documented\n  \"Says hi to the caller.\"\n  [who] who)\n"))
@@ -145,7 +147,7 @@
 (defn test-build-and-find [top git?]
   (let [{:keys [code out]} (run top "build")]
     (check! "build exit 0" (= 0 code) out)
-    (check! "build prints SCANNED (evidence floor)" (re-find #"(?m)^SCANNED\t6$" out) out)
+    (check! "build prints SCANNED (evidence floor)" (re-find #"(?m)^SCANNED\t7$" out) out)
     (check! "prune: 1,000 consecutive source-less dirs cut the group and say so"
             (re-find #"(?m)^PRUNED\t1\t\(1000 consecutive" out) out)
     (check! "venv: pyvenv.cfg dir skipped and counted"
@@ -178,15 +180,15 @@
       (check! "gitignored generated dir absent"
               (not (re-find #"only-in-generated" idx)) idx))
     (check! "inline reader-cond and shallow-indent defs indexed as nested"
-            (and (re-find #"(?m)^inline-cond\tdefn\t[^\n]*\tn$" idx)
-                 (re-find #"(?m)^nested-fn\tdefn\t[^\n]*\tn$" idx))
+            (and (re-find #"(?m)^inline-cond\tdefn\t[^\n]*\tn\t[0-9a-f]{10}$" idx)
+                 (re-find #"(?m)^nested-fn\tdefn\t[^\n]*\tn\t[0-9a-f]{10}$" idx))
             idx)
     (check! "multi-line ^{:doc} metadata: name and the (def line, not the name's line"
-            (re-find #"(?m)^multiline-meta\tdef\torgs/a/src/a/core.cljk\t13\ta.core\t$" idx) idx)
+            (re-find #"(?m)^multiline-meta\tdef\torgs/a/src/a/core.cljk\t13\ta.core\t\t[0-9a-f]{10}$" idx) idx)
     (check! "blank lines before a def do not turn it into nested"
-            (re-find #"(?m)^multiline-meta\tdef\t[^\n]*\t$" idx) idx)
+            (re-find #"(?m)^multiline-meta\tdef\t[^\n]*\t\t[0-9a-f]{10}$" idx) idx)
     (check! "reader-cond split over two lines: line is the (defn line, nested"
-            (re-find #"(?m)^split-cond\tdefn\torgs/a/src/a/core.cljk\t7\ta.core\tn$" idx) idx)
+            (re-find #"(?m)^split-cond\tdefn\torgs/a/src/a/core.cljk\t7\ta.core\tn\t[0-9a-f]{10}$" idx) idx)
     (check! "prune keeps the repo's src and drops only the pruned group"
             (and (re-find #"kept-in-pruned-repo" idx) (not (re-find #"lost-after-budget" idx))) idx)
     (check! "pruned group is named in the header"
@@ -195,7 +197,7 @@
     (check! "4+ space indent is not indexed"
             (not (re-find #"deep-string-def" idx)) idx)
     (check! "ns column filled from the file's (ns …)"
-            (re-find #"(?m)^same-name\tdefn\torgs/b/src/b/core.cljc\t2\tb.core\t$" idx) idx))
+            (re-find #"(?m)^same-name\tdefn\torgs/b/src/b/core.cljc\t2\tb.core\t\t[0-9a-f]{10}$" idx) idx))
   (let [{:keys [code out]} (run top "find" "same-name")]
     (check! "find hit exit 0 with 2 hits" (and (= 0 code) (re-find #"2 hits" out)) out))
   (let [{:keys [code out]} (run top "find" "SAME-NAME")]
@@ -223,9 +225,9 @@
     (check! "snippet is forward-biased: 1 line before, 6 after (the definition's opening)"
             (and (re-find #"(?m)^  1\| \(ns a.core\)" out) (re-find #"(?m)^  8\| " out) (not (re-find #"(?m)^  9\| " out))) out))
   (let [{:keys [code out]} (run top "find" "same-name")]
-    (check! "identical copies (same sym/kind/line/stem, .clj vs .cljc) fold into one row with +N copies"
-            (and (re-find #"2 hits for same-name \(1 copies folded\)" out)
-                 (re-find #"(?m)^  defn same-name — orgs/b/src/b/core.cljc:2  \(\+1 copies\)$" out)) out)
+    (check! "identical copies (same content hash, .clj vs .cljc) fold into one row with +N identical"
+            (and (re-find #"2 hits for same-name \(1 identical folded\)" out)
+                 (re-find #"(?m)^  defn same-name — orgs/b/src/b/core.cljc:2  #[0-9a-f]{10}  \(\+1 identical\)$" out)) out)
     (check! "find with 2 hits prints both snippets, each under its own == header"
             (and (= 0 code) (= 2 (count (re-seq #"(?m)^== defn same-name — " out)))
                  (re-find #"(?m)^  2\| \(defn same-name \[\] :b\)" out)) out))
@@ -241,10 +243,15 @@
   (let [{:keys [code out]} (run top "find" "same" "--exact")]
     (check! "find --exact needs the whole name (0 hits for a fragment)"
             (and (= 1 code) (re-find #"0 hits for same --exact" out)) out))
-  (let [{:keys [code out]} (run top "find" "pad")]
+  (let [{:keys [code out]} (run top "find" "wide-")]
     (check! "wide hits: summary by repo + 8 ranked rows, not a 40-row dump"
-            (and (= 0 code) (re-find #"too many to list: \d+ exact" out) (re-find #"(?m)^  \d+\tedge.cljk|^  \d+\t$" out)
-                 (= 8 (count (re-seq #"(?m)^  def pad — " out)))) out))
+            (and (= 0 code) (re-find #"too many to list: 0 exact, 45 substring" out)
+                 (= 8 (count (re-seq #"(?m)^  defn wide-" out)))) out))
+  (let [{:keys [code out]} (run top "find" "pad")]
+    ;; edge.cljk の最後の (def pad 1) だけ span に末尾の ; 詰め物を含むので hash が違う → 2 行
+    (check! "identical (def pad 1) fold into one row by content hash; the one with a different span stays apart"
+            (and (= 0 code) (re-find #"2 hits for pad \(\d+ identical folded\)" out)
+                 (re-find #"(?m)^  def pad — edge.cljk:1  #[0-9a-f]{10}  \(\+\d+ identical\)$" out)) out))
   (let [{:keys [code out]} (run top "find" "hidden-fx")]
     (check! "0 hits: near suggestions by fragment (false negative guard)"
             (and (= 1 code) (re-find #"(?m)^  near \(by fragment [^)]*\): [^\n]*hidden-fn" out)) out))
@@ -253,15 +260,15 @@
             (and (= 1 code) (not (re-find #"hidden-fn" out))) out))
   (let [{:keys [code out]} (run top "outline" "b/core.cljc" "--bare")]
     (check! "outline --bare by file suffix lists defs in line order"
-            (and (= 0 code) (re-find #"(?m)^== orgs/b/src/b/core.cljc\n  1\tns b.core\n  2\tdefn same-name$" out)) out))
+            (and (= 0 code) (re-find #"(?m)^== orgs/b/src/b/core.cljc\n  1\tns b.core  #[0-9a-f]{10}\n  2\tdefn same-name  #[0-9a-f]{10}$" out)) out))
   (let [{:keys [code out]} (run top "outline" "a.core")]
     (check! "outline by ns marks nested defs with ~ and shows the signature (arglist + body head)"
-            (and (= 0 code) (re-find #"(?m)^  5\t~defn inline-cond  · \[\] 1$" out)
-                 (re-find #"(?m)^  2\tdefn hidden-fn  · \[x\] x$" out)
+            (and (= 0 code) (re-find #"(?m)^  5\t~defn inline-cond  · \[\] 1  #[0-9a-f]{10}$" out)
+                 (re-find #"(?m)^  2\tdefn hidden-fn  · \[x\] x  #[0-9a-f]{10}$" out)
                  (not (re-find #"deep-string-def" out))) out))
   (let [{:keys [code out]} (run top "outline" "a.more")]
     (check! "outline signature falls back to the docstring's first line when the arglist comes later"
-            (and (= 0 code) (re-find #"(?m)^  5\tdefn documented  · Says hi to the caller\.$" out)) out))
+            (and (= 0 code) (re-find #"(?m)^  5\tdefn documented  · Says hi to the caller\.  #[0-9a-f]{10}$" out)) out))
   (let [{:keys [code out]} (run top "outline" "nope.core")]
     (check! "outline unknown target REFUSE exit 2"
             (and (= 2 code) (re-find #"(?m)^REFUSE\tno definitions for nope.core" out)) out))
@@ -295,16 +302,16 @@
         _ (.writeFileSync fs f (str ";; two lines\n;; inserted\n" (.readFileSync fs f "utf8")) "utf8")
         {:keys [code out]} (run top "find" "b.core/same-name")]
     (check! "stale file: find re-locates the line and says so"
-            (and (= 0 code) (re-find #"(?m)^  \(re-located: file changed after index, was line 2\)$" out)
+            (and (= 0 code) (re-find #"(?m)^  \(re-located: file changed after index, was line 2; body unchanged\)$" out)
                  (re-find #"(?m)^  4\| \(defn same-name \[\] :b\)" out)) out))
   (let [{:keys [code out]} (run top "show" "b.core/same-name")]
     (check! "stale file: show re-locates too"
-            (and (= 0 code) (re-find #"core.cljc:4$" (first (filter #(str/starts-with? % "== defn b.core/same-name") (str/split-lines out))))
+            (and (= 0 code) (re-find #"core.cljc:4  #[0-9a-f]{10}$" (first (filter #(str/starts-with? % "== defn b.core/same-name") (str/split-lines out))))
                  (re-find #"(?m)^  4\| \(defn same-name" out)) out))
   (let [{:keys [code out]} (run top "outline" "b/core.cljc" "--bare")]
     (check! "stale file: outline re-scans the file"
             (and (= 0 code) (re-find #"(?m)^  \(re-scanned: file changed after index\)$" out)
-                 (re-find #"(?m)^  3\tns b.core\n  4\tdefn same-name$" out)) out))
+                 (re-find #"(?m)^  3\tns b.core  #[0-9a-f]{10}\n  4\tdefn same-name  #[0-9a-f]{10}$" out)) out))
   (let [{:keys [code out]} (run top "find" "hidden-fn")]
     (check! "fresh file: no relocation note" (and (= 0 code) (not (re-find #"re-located|re-scanned" out))) out))
   (let [f (.join path top "orgs" "b" "src" "b" "core.cljc")
@@ -389,7 +396,7 @@
     (write! top "a/one.cljk" "(ns one)\n(defn f1 [] 1)\n(defn f1-added [] 3)\n")
     (let [{:keys [out]} (run top "build") idx (idx-file)]
       (check! "changed file is re-scanned, the other served from cache"
-              (and (re-find #"(?m)^CACHED-FILES\t1\tof 2$" out) (re-find #"(?m)^f1-added\tdefn\ta/one.cljk\t3\tone\t$" idx)) (str out idx)))
+              (and (re-find #"(?m)^CACHED-FILES\t1\tof 2$" out) (re-find #"(?m)^f1-added\tdefn\ta/one.cljk\t3\tone\t\t[0-9a-f]{10}$" idx)) (str out idx)))
     ;; 2) 新 file の追加 → 親 dir の mtime が変わり readdir し直す
     (write! top "b/three.cljk" "(defn f3 [] 3)\n")
     (let [{:keys [out]} (run top "build") idx (idx-file)]
@@ -403,13 +410,40 @@
     (let [{:keys [out]} (run top "build" "--full")]
       (check! "--full ignores the cache" (re-find #"(?m)^CACHED-FILES\t0\tof 2$" out) out))))
 
+(defn test-content-hash []
+  (let [top (mk-tmp "hash")
+        idx (fn [] (.readFileSync fs (.join path top ".kotoba-cache" "symbol-index.tsv") "utf8"))
+        hash-of (fn [sym] (second (re-find (js/RegExp. (str "^" sym "\\t[^\\n]*\\t([0-9a-f]{10})$") "m") (idx))))]
+    (write! top "a.cljk" "(ns a)\n(defn f [x]\n  (+ x 1))\n(defn g [] 2)\n")
+    (run top "build")
+    (let [f0 (hash-of "f") g0 (hash-of "g")]
+      (check! "hash is 10 hex per definition" (and (re-find #"^[0-9a-f]{10}$" (str f0)) (re-find #"^[0-9a-f]{10}$" (str g0))) (idx))
+      ;; 空白だけの変更 → 同じ hash
+      (write! top "a.cljk" "(ns a)\n(defn f [x]\n    (+ x   1))\n\n(defn g [] 2)\n")
+      (run top "build" "--full")
+      (check! "whitespace-only change keeps the hash (Unison-style identity)" (= f0 (hash-of "f")) (str f0 " vs " (hash-of "f")))
+      ;; 本文の変更 → 違う hash、隣の定義は不変
+      (write! top "a.cljk" "(ns a)\n(defn f [x]\n  (+ x 2))\n(defn g [] 2)\n")
+      (run top "build" "--full")
+      (check! "body change changes the hash; the neighbour's hash is untouched"
+              (and (not= f0 (hash-of "f")) (= g0 (hash-of "g"))) (idx))
+      ;; stale file: 行がずれただけ → body unchanged、本文も変えた → body changed → #new
+      (let [f1 (hash-of "f")]
+        (write! top "a.cljk" ";; moved\n(ns a)\n(defn f [x]\n  (+ x 2))\n(defn g [] 3)\n")
+        (let [{:keys [out]} (run top "show" "a/f")]
+          (check! "stale file, same body: note says body unchanged"
+                  (re-find #"re-located: file changed after index, was line 2; body unchanged" out) out))
+        (let [{:keys [out]} (run top "show" "a/g")]
+          (check! "stale file, changed body: note says body changed with the new hash"
+                  (and (re-find #"was line 4; body changed → #[0-9a-f]{10}" out) (not (re-find (js/RegExp. (str "#" (hash-of "g") "\\)")) out))) out))))))
+
 (defn test-stale-json []
   (let [top (mk-tmp "json")]
     (write! top "x.cljk" "(defn foo [] 1)\n")
     (write! top ".kotoba-cache/symbol-index.tsv" "{\"symbols\":[]}\n")
     (let [{:keys [code out]} (run top "find" "foo")]
-      (check! "non-v2 index REFUSE exit 2"
-              (and (= 2 code) (re-find #"(?m)^REFUSE\tindex is not v2 TSV" out)) out))))
+      (check! "non-TSV index REFUSE exit 2"
+              (and (= 2 code) (re-find #"(?m)^REFUSE\tindex is not a TSV index" out)) out))))
 
 ;; ------------------------------------------------------------------ main
 
@@ -426,6 +460,7 @@
   (test-wrong-top)
   (test-top-is-worktree)
   (test-incremental)
+  (test-content-hash)
   (test-no-index-and-root-discovery)
   (test-stale-json))
 

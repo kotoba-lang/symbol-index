@@ -36,7 +36,7 @@
 
 (def index-dir ".kotoba-cache")
 (def index-file "symbol-index.tsv")
-(def index-version "v2")
+(def index-version "v3")   ; v3: 7 列目に定義の content hash (iteration 14)
 
 (defn- nearest-indexed-ancestor
   "cwd から上へ辿って .kotoba-cache/symbol-index.tsv を持つ最初の dir。無ければ nil。
@@ -294,15 +294,23 @@
     (subs full (inc (count top)))
     full))
 
+(def ^:private crypto (js/require "node:crypto"))
+
+(defn- content-hash
+  "定義本文の content hash: 空白の連なりを 1 つに畳み、前後を trim して sha256、先頭 10 hex。"
+  [span]
+  (let [norm (str/trim (str/replace span #"\s+" " "))]
+    (subs (.digest (.update (.createHash crypto "sha256") norm "utf8") "hex") 0 10)))
+
 (defn- scan-file
-  "1 file から TSV 行 (sym<TAB>kind<TAB>file<TAB>line<TAB>ns<TAB>flags) の列を返す。
+  "1 file から TSV 行 (sym<TAB>kind<TAB>file<TAB>line<TAB>ns<TAB>flags<TAB>hash) の列を返す。
   `(ns …)` を跨ぐごとに ns を持ち替え、後続の def にその ns を付ける (show の ns/sym
   曖昧性解消に使う)。行番号は match の index までの改行を数えて出す (前回 match から
   差分で数える)。iteration 7: map でなく行文字列を返す (cache にそのまま入る)。"
   [full rel]
   (let [text (.readFileSync fs full "utf8")
         ns* (volatile! "")
-        out (volatile! [])]
+        heads (volatile! [])]
     (set! (.-lastIndex def-form-re) 0)
     (loop [line 1 from 0]
       (when-let [m (.exec def-form-re text)]
@@ -314,9 +322,19 @@
                      (if (or (neg? i) (>= i idx)) l (recur (inc l) (.indexOf text "\n" (inc i)))))
               kind (aget m 2) sym (aget m 3) nested (some? (aget m 1))]
           (when (= kind "ns") (vreset! ns* sym))
-          (vswap! out conj (str sym "\t" kind "\t" rel "\t" line "\t" (if (= kind "ns") sym @ns*) "\t" (if nested "n" "")))
+          (vswap! heads conj {:sym sym :kind kind :line line :ns (if (= kind "ns") sym @ns*) :nested nested :idx idx})
           (recur line idx))))
-    @out))
+    ;; iteration 14: 定義の span = この def の先頭から次の top-level def の直前まで (sexp parser
+    ;; を持ち込まない)。空白を正規化して sha256 の先頭 10 hex を content hash にする。
+    ;; 名前に依らない Unison 型の同一性: 写しは同じ hash、空白だけの変更は同じ hash、
+    ;; 本文の変更は違う hash。span なので def 間の comment も含む (それも「その定義の文脈」)。
+    (let [hs @heads n (count hs)]
+      (vec (map-indexed
+            (fn [i {:keys [sym kind line ns nested idx]}]
+              (let [end (if (< (inc i) n) (:idx (nth hs (inc i))) (count text))
+                    span (subs text idx end)]
+                (str sym "\t" kind "\t" rel "\t" line "\t" ns "\t" (if nested "n" "") "\t" (content-hash span))))
+            hs)))))
 
 (defn- build-index
   "全対象 file から TSV 行の列 (file ごとの block) と走査統計を作る。統計は evidence
@@ -394,9 +412,9 @@
             kvs))))
 
 (defn- parse-row [line]
-  (let [[sym kind file ln ns flags] (str/split line #"\t")]
+  (let [[sym kind file ln ns flags hash] (str/split line #"\t")]
     {:sym sym :kind kind :file file :line (js/parseInt ln 10) :ns (or ns "")
-     :nested (= flags "n")}))
+     :nested (= flags "n") :hash (or hash "")}))
 
 (defn- refuse
   "拒否は理由を印字して 2 を返す。理由の literal は test が pin する。"
@@ -439,7 +457,8 @@
       (let [text (.readFileSync fs p "utf8")
             h (parse-header text)]
         (cond
-          (nil? h) {:error "index is not v2 TSV (stale JSON?) — run build"}
+          (nil? h) {:error "index is not a TSV index (stale JSON?) — run build"}
+          (not= (:version h) index-version) {:error (str "index is " (:version h) ", this script needs " index-version " — run build")}
           (not= (:top h) top) {:error (str "index was built for top=" (:top h) " but cwd top=" top " — run build here")}
           (= "0" (:symbols h)) {:error (str "index has 0 symbols (scanned " (:scanned h) " files) — run build")}
           :else {:header h :text text})))))
@@ -478,9 +497,10 @@
      file]))
 
 (defn- fmt-hit
-  [{:keys [sym kind file line nested copies]}]
+  [{:keys [sym kind file line nested copies hash]}]
   (str "  " (if nested "~" "") kind " " sym " — " file ":" line
-       (when (and copies (pos? copies)) (str "  (+" copies " copies)"))))
+       (when (seq hash) (str "  #" hash))
+       (when (and copies (pos? copies)) (str "  (+" copies " identical)"))))
 
 (defn- built-ms [header]
   (try (.getTime (js/Date. (:built-at header))) (catch :default _ 0)))
@@ -500,18 +520,25 @@
   (rebuild 無しで精度を保つ。1.6 h の索引で変更済み file は 0.10% だが、agent が
   今編集している file こそ次に引く file)。同 sym/kind の行のうち旧行に最も近いものを
   採る。返り値は hit に :relocated-from (旧行) か :gone true を足したもの。"
-  [{:keys [file sym kind line] :as hit} built]
+  [{:keys [file sym kind line hash] :as hit} built]
   (if-not (stale-file? file built)
     hit
     (let [cands (filter #(and (= sym (:sym %)) (= kind (:kind %))) (or (fresh-rows file) []))]
       (if (empty? cands)
         (assoc hit :gone true)
-        (let [best (apply min-key #(js/Math.abs (- (:line %) line)) cands)]
-          (if (= (:line best) line) hit (assoc hit :line (:line best) :relocated-from line)))))))
+        ;; iteration 14: 同じ hash (本文同一) を最優先、無ければ旧行に最も近いもの。
+        ;; 本文が変わったかどうかは hash の一致で分かるので note に出す (agent は
+        ;; 「行がずれただけ」なら読み直さなくてよい)
+        (let [best (apply min-key (fn [c] (+ (if (= (:hash c) hash) 0 1000000) (js/Math.abs (- (:line c) line)))) cands)
+              same? (= (:hash best) hash)]
+          (cond-> (assoc hit :hash (:hash best) :content-changed (not same?))
+            (not= (:line best) line) (assoc :line (:line best) :relocated-from line)))))))
 
-(defn- relocation-note [{:keys [relocated-from gone]}]
+(defn- relocation-note [{:keys [relocated-from gone content-changed hash]}]
   (cond gone "  (file changed after index and no longer defines this symbol — build)"
-        relocated-from (str "  (re-located: file changed after index, was line " relocated-from ")")
+        relocated-from (str "  (re-located: file changed after index, was line " relocated-from
+                            (if content-changed (str "; body changed → #" hash) "; body unchanged") ")")
+        content-changed (str "  (file changed after index; this definition's body changed → #" hash ")")
         :else nil))
 
 (defn- snippet
@@ -579,15 +606,16 @@
             ;; 同じ定義の写し (同 sym/kind/line/basename、verify-run や clone の copy) は 1 行に
             ;; 畳み、最短 path を代表にして :copies に残りの数を持つ (iteration 9)
             ranked (->> (sort-by #(rank-key term0 %) hits)
-                        ;; 拡張子は見ない: .clj → .cljk の rename 前の写しも同じ定義
-                        (group-by (fn [{:keys [sym kind line file]}] [sym kind line (.basename path file (.extname path file))]))
+                        ;; iteration 14: 写しは content hash で畳む (stem/line の推定をやめた)。
+                        ;; 同じ本文なら別 repo・別行・別拡張子でも 1 行、本文が違えば別 (行が同じでも)
+                        (group-by (fn [{:keys [sym kind hash]}] [sym kind hash]))
                         vals
                         (map (fn [grp] (assoc (first grp) :copies (dec (count grp)))))
                         (sort-by #(rank-key term0 %)))
             n (count ranked)
             exact (filter #(zero? (first (rank-key term0 %))) ranked)]
         (println (str "indexed " (:symbols header) " symbols, " n " hits for " (str/join " " terms)
-                      (when (> (count hits) n) (str " (" (- (count hits) n) " copies folded)"))
+                      (when (> (count hits) n) (str " (" (- (count hits) n) " identical folded)"))
                       (when in-filter (str " --in " in-filter)) (when exact? " --exact")))
         (age-warning header)
         (if (<= n find-limit)
@@ -642,8 +670,8 @@
           (refuse "no exact match for " target " — try: find " leaf)
           (do
             (doseq [h (take 3 hits)]
-              (let [{:keys [file line sym kind ns gone] :as h} (relocate h (built-ms header))]
-                (println (str "== " kind " " (if (seq ns) (str ns "/") "") sym " — " file ":" line))
+              (let [{:keys [file line sym kind ns gone hash] :as h} (relocate h (built-ms header))]
+                (println (str "== " kind " " (if (seq ns) (str ns "/") "") sym " — " file ":" line (when (seq hash) (str "  #" hash))))
                 (when-let [note (relocation-note h)] (println note))
                 (when-not gone (println (snippet file line)))))
             (when (> (count hits) 3)
@@ -698,10 +726,11 @@
                     _ (when frows (println "  (re-scanned: file changed after index)"))
                     lines (when-not (:bare opts)
                             (try (str/split-lines (.readFileSync fs (.join path top f) "utf8")) (catch :default _ nil)))]
-                (doseq [{:keys [line kind sym nested]} (sort-by :line (or frows (filter #(= f (:file %)) rows)))]
+                (doseq [{:keys [line kind sym nested hash]} (sort-by :line (or frows (filter #(= f (:file %)) rows)))]
                   (let [sig (when lines (signature lines line sym))]
                     (println (str "  " line "\t" (if nested "~" "") kind " " sym
-                                  (when (seq sig) (str "  · " sig))))))))
+                                  (when (seq sig) (str "  · " sig))
+                                  (when (seq hash) (str "  #" hash))))))))
             (when (> (count files) 5)
               (println (str "  ... " (- (count files) 5) " more files match " target " (give a longer path)")))
             0))))))

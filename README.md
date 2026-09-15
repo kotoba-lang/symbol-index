@@ -12,7 +12,7 @@
 <query>              # subcommand 不要: *.cljk / a.b → outline、a.b/c → show、他 → find (解釈を 1 行目に出す)
 find <term>          # どこに在るか。hit ≤3 なら定義の冒頭まで出る (往復 1 回)
 find <ns>/<term> | --in <path> | --exact   # 多いときの絞り込み (出力が次の 1 手を示す)
-outline <file|ns>    # file を Read する前の地図: 行番号 + signature (arglist / docstring 1 行目)
+outline <file|ns>    # file を Read する前の地図: 行番号 + signature + #hash (変更確認は hash 比較で、cat しない)
 show <ns/sym>        # 定義の前後 3 行。ns で曖昧性を解く
 ```
 
@@ -135,6 +135,18 @@ build 1.6 h 後の root corpus で変更済み file は 0.10% (49/47,353) だが
 している file こそ次に引く file。`find` / `show` / `outline` は hit の file の mtime が
 built-at より新しければその file だけ再走査して行番号を直し、`(re-located: … was line N)`
 / `(re-scanned)` と印字する。symbol が消えていれば snippet を出さず build を促す。
+
+### iteration 14 (2026-09-15) — 定義の content hash (Unison 型)
+
+索引 v3 は定義ごとに content hash (#10 hex) を持つ。span はその def から次の top-level def の
+直前まで、空白を畳んで sha256。**名前でなく本文で同一**: 写しは同じ hash、空白だけの変更は
+同じ hash、本文の変更は違う hash。
+
+root corpus の実測: **定義の 41.2% (233,858 / 567,719) は他と本文が同一**。旧 iteration 9 の
+推定畳み (sym/kind/line/stem) は 10,322 group で本文の違う定義を同一視していた → hash で消えた。
+
+agent はこう使う: 変更の有無は `cat` でなく `outline` の hash 比較 (file の 1/5.7)。`find` の
+`(+N identical)` の写しは読まない。stale file の `re-located … body unchanged` なら読み直さない。
 
 ### iteration 13 (2026-09-15) — 固定点
 
