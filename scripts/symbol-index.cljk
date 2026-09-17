@@ -778,7 +778,10 @@
             n (count ranked)
             exact (filter #(zero? (first (rank-key term0 %))) ranked)]
         (println (str "indexed " (:symbols header) " symbols, " n " hits for " (str/join " " terms)
-                      (when (> (count hits) n) (str " (" (- (count hits) n) " identical folded" (if unfold? ", listed" "; --unfold lists them") ")"))
+                      ;; --unfold の誘いは定義が 2 つ以上のときだけ (09-17 腕 F q2: 単一 hit でも誘いに乗って
+                      ;; --unfold → 写しの sed まで行き +2 call。複数定義の q8 では誘いが 600 s の時間切れを消した)
+                      (when (> (count hits) n) (str " (" (- (count hits) n) " identical folded"
+                                                    (cond unfold? ", listed" (>= n 2) "; --unfold lists them" :else "") ")"))
                       (when in-filter (str " --in " in-filter)) (when exact? " --exact")))
         (age-warning header)
         (if (<= n find-limit)

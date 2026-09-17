@@ -148,6 +148,26 @@ root corpus の実測: **定義の 41.2% (233,858 / 567,719) は他と本文が�
 agent はこう使う: 変更の有無は `cat` でなく `outline` の hash 比較 (file の 1/5.7)。`find` の
 `(+N identical)` の写しは読まない。stale file の `re-located … body unchanged` なら読み直さない。
 
+### iteration 16 (2026-09-17) — agent 側の実測 (Hermes 腕 D / E / F) と、そこで見えた 2 つの穴
+
+iteration 7〜15 の効果を初めて agent 側で測った (`bench/hermes_ab.cljk`、8 query、同日 3 腕):
+
+| 腕 | 正解 | timeout | tool call | API call | token | file read |
+|---|---|---|---|---|---|---|
+| D: v4 索引 + 09-15 の skill | 7/8 | 1 | 3.1 | 4.0 | 72,798 | 0 |
+| E: + skill 規則 0 (project root で引く) | 7/8 | 1 | 1.8 | 2.5 | 46,269 | 0 |
+| F: + iteration 16 (登録簿 fallback / --unfold) | **8/8** | **0** | **1.5** | **2.5** | **46,060** | 0 |
+
+D で見えた穴: ①hermes の terminal は `$HOME` から始まり、7/8 が `REFUSE no index` を受け、6/8 が拒否文の
+「run `symbol-index build`」に従って build を走らせた (+1.1 call / query)。②multi-hit の q8 は
+「(N identical folded)」の写しの file:line を TSV の grep で出そうとして 600 s 時間切れ。
+直し: `build` が root を `~/.kotoba-cache/symbol-index-roots` に記録し、cwd に索引が無いとき登録簿の
+root が 1 つだけならそれで答える (読むだけ、build しない。2 つ以上なら列挙して REFUSE)。REFUSE 文は
+cd が先頭。`find --unfold` で写しを列挙 (誘いは定義が 2 つ以上のときだけ)。skill に規則 0。
+bench 側の欠陥も 2 つ (期待 file:line が 2 日で 4/10 古びた → `--regrade`、si の計数 regex が
+subcommand 無しを 0 と数えた)。file read は 3 腕とも 0 —— iteration 7 の snippet が agent 側で効いている。
+壁時計は日を跨いで比べない (API 1 call が 09-15 の 9 s → 70–120 s)。
+
 ### iteration 15 (2026-09-17) — 構造 hash (TSV v4 として着地)
 
 v3 の text hash は「写しの検出」には効くが「名前だけ違う同じ定義」は畳めず、rename / comment で

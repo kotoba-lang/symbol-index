@@ -257,8 +257,9 @@
   (let [{:keys [code out]} (run top "find" "pad")]
     ;; edge.cljk の最後の (def pad 1) は span に末尾の ; 詰め物を含む。v3 (text hash) では別行だったが、
     ;; v4 (構造 hash) では comment は identity に入らないので 1 行に畳む (iteration 15)
+    ;; 定義が 1 つなら --unfold の誘いは出さない (2 つ以上のときだけ。same-name の test が対になる)
     (check! "identical (def pad 1) fold into one row by structural hash, even the one whose span carries trailing comments"
-            (and (= 0 code) (re-find #"1 hits for pad \(\d+ identical folded; --unfold lists them\)" out)
+            (and (= 0 code) (re-find #"1 hits for pad \(\d+ identical folded\)" out)
                  (re-find #"(?m)^  def pad — edge.cljk:1  #[0-9a-f]{10}  \(\+\d+ identical\)$" out)) out))
   (let [{:keys [code out]} (run top "find" "hidden-fx")]
     (check! "0 hits: near suggestions by fragment (false negative guard)"
@@ -497,7 +498,7 @@
     (let [{:keys [code out]} (run elsewhere {:env env} "find" "known-root-fn")]
       (check! "find from a cwd without an index answers from the single known root and says so on line 1"
               (and (= 0 code) (re-find #"(?m)^\(using index root .* — cwd .* has none; cd there or set SYMBOL_INDEX_ROOT to silence this\)$" out)
-                   (re-find #"1 hits for known-root-fn \(2 identical folded; --unfold lists them\)" out)) out)
+                   (re-find #"1 hits for known-root-fn \(2 identical folded\)" out)) out)
       (check! "the fallback does not build anything in the cwd"
               (not (.existsSync fs (.join path elsewhere ".kotoba-cache" "symbol-index.tsv"))) ""))
     (let [{:keys [code out]} (run elsewhere {:env env} "find" "known-root-fn" "--unfold")]
