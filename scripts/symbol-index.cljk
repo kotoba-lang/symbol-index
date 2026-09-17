@@ -38,7 +38,7 @@
 
 (def index-dir ".kotoba-cache")
 (def index-file "symbol-index.tsv")
-(def index-version "v4")   ; v4: 7 列目が構造 hash (iteration 15)、読めない定義は text hash + flag t
+(def index-version "v5")   ; v5: 8 列目に参照 (iteration 18)。v4: 7 列目が構造 hash、読めない定義は text hash + flag t
 
 (defn- nearest-indexed-ancestor
   "cwd から上へ辿って .kotoba-cache/symbol-index.tsv を持つ最初の dir。無ければ nil。
@@ -423,7 +423,7 @@
     form))
 
 (defn- structural-hash
-  "span の第 1 form の構造 hash。reader を通らなければ nil (呼び側が text hash に落とす)。"
+  "span の第 1 form の構造 hash と正規化 form [hash norm]。reader を通らなければ nil (呼び側が text hash に落とす)。"
   [span]
   (try
     (let [form (e/parse-next (e/reader span) parse-opts)]
@@ -431,31 +431,82 @@
         (let [form (strip-doc form)
               defname (when (def-form? form) (second form))
               ren (into {} (map-indexed (fn [i s] [s (symbol (str "%" i))]) (collect-locals form)))
-              ren (if (symbol? defname) (assoc ren defname '%name) ren)]
-          (sha10
-           (binding [*print-meta* true]
-             (pr-str
-              (walk/postwalk
-               (fn [x]
-                 (let [x (strip-loc-meta x)]
-                   (cond
-                     (symbol? x)
-                     (let [x' (get ren x x)]
-                       ;; syntax-quote の gensym a__12__auto__ は番号が不安定
-                       (if (str/ends-with? (name x') "__auto__")
-                         (symbol (str/replace (name x') #"__\d+__auto__$" "__auto__"))
-                         (with-meta x' (meta x))))
-                     ;; regex は値等価を持たず、9 要素以上の map は hash 順 → 印字を sort
-                     (set? x) (with-meta (list 'SET* (vec (sort (map pr-str x)))) (meta x))
-                     (map? x) (with-meta (list 'MAP* (vec (sort (map (fn [[k v]] (pr-str [k v])) x)))) (meta x))
-                     :else x)))
-               form)))))))
+              ren (if (symbol? defname) (assoc ren defname '%name) ren)
+              norm (walk/postwalk
+                    (fn [x]
+                      (let [x (strip-loc-meta x)]
+                        (cond
+                          (symbol? x)
+                          (let [x' (get ren x x)]
+                            ;; syntax-quote の gensym a__12__auto__ は番号が不安定
+                            (if (str/ends-with? (name x') "__auto__")
+                              (symbol (str/replace (name x') #"__\d+__auto__$" "__auto__"))
+                              (with-meta x' (meta x))))
+                          ;; regex は値等価を持たず、9 要素以上の map は hash 順 → 印字を sort
+                          (set? x) (with-meta (list 'SET* (vec (sort (map pr-str x)))) (meta x))
+                          (map? x) (with-meta (list 'MAP* (vec (sort (map (fn [[k v]] (pr-str [k v])) x)))) (meta x))
+                          :else x)))
+                    form)]
+          [(sha10 (binding [*print-meta* true] (pr-str norm))) norm])))
     (catch :default _ nil)))
 
-(defn- definition-hash
-  "v4 の 7 列目: 構造 hash、読めなければ text hash。第 2 値は flag (\"t\" = text fallback)。"
+;; ---------------------------------------------------------------- 参照 (iteration 18)
+;; 8 列目: この定義の本文が参照する、索引で辿れる可能性のある symbol。quote の中と局所 (%N) と自名 (%name)
+;; は除く。持つのは 3 種だけ (core / interop / 索引外の lib は名前を持たない):
+;;   bare `sym`     同じ file に定義がある unqualified symbol   (同 ns の別 file は落ちる。設計上の穴、README に記す)
+;;   `ns/sym`       ns form の :require [x :as a] の alias 経由 (`a/sym` → `x/sym`) と :refer、および完全修飾
+;; 参照先の解決 (どの行か) は query 時 (find --dependents / closure)。build cost を上げないため。
+
+(defn- ns-info
+  "(ns x (:require [a.b :as c] [d.e :refer [f]] ...)) の span → {:aliases {\"c\" \"a.b\"} :refers {\"f\" \"d.e\"}}。
+  reader conditional の両 branch を見る。読めなければ空。"
   [span]
-  (if-let [h (structural-hash span)] [h ""] [(content-hash span) "t"]))
+  (try
+    (let [form (e/parse-next (e/reader span) parse-opts)
+          aliases (volatile! {}) refers (volatile! {})]
+      (walk/prewalk
+       (fn [x]
+         (when (and (seq? x) (#{:require :require-macros :use} (first x)))
+           (doseq [spec (rest x)]
+             (let [spec (if (symbol? spec) [spec] spec)]
+               (when (and (vector? spec) (symbol? (first spec)))
+                 (let [ns* (name (first spec)) opts (apply hash-map (rest spec))]
+                   (when (symbol? (:as opts)) (vswap! aliases assoc (name (:as opts)) ns*))
+                   (when (vector? (:refer opts)) (doseq [s (:refer opts)] (when (symbol? s) (vswap! refers assoc (name s) ns*)))))))))
+         x)
+       form)
+      {:aliases @aliases :refers @refers})
+    (catch :default _ {:aliases {} :refers {}})))
+
+(defn- body-refs
+  "正規化 form → 参照 symbol 列 (sorted、重複無し)。local-syms は同 file の定義名の集合。"
+  [norm {:keys [aliases refers]} local-syms]
+  (let [acc (volatile! #{})]
+    (letfn [(w [x] (cond
+                     (and (seq? x) (= 'quote (first x))) nil
+                     (symbol? x)
+                     (let [s (str x)]
+                       (when-not (str/starts-with? s "%")
+                         (let [i (.indexOf s "/")]
+                           (if (pos? i)
+                             (let [a (subs s 0 i) b (subs s (inc i))]
+                               (cond (get aliases a) (vswap! acc conj (str (get aliases a) "/" b))
+                                     (str/includes? a ".") (vswap! acc conj s)
+                                     :else nil))
+                             (cond (local-syms s) (vswap! acc conj s)
+                                   (get refers s) (vswap! acc conj (str (get refers s) "/" s))
+                                   :else nil)))))
+                     (coll? x) (run! w x)
+                     :else nil))]
+      (w norm))
+    (vec (sort @acc))))
+
+(defn- definition-hash
+  "7 列目: 構造 hash、読めなければ text hash。返り値 [hash flag refs]、flag \"t\" = text fallback (refs は空)。"
+  [span info local-syms]
+  (if-let [[h norm] (structural-hash span)]
+    [h "" (body-refs norm info local-syms)]
+    [(content-hash span) "t" []]))
 
 (defn- scan-file
   "1 file から TSV 行 (sym<TAB>kind<TAB>file<TAB>line<TAB>ns<TAB>flags<TAB>hash) の列を返す。
@@ -482,13 +533,20 @@
     ;; iteration 14: 定義の span = この def の先頭から次の top-level def の直前まで。
     ;; iteration 15: span の第 1 form を reader に通した構造 hash (definition-hash)。読めなければ
     ;; text hash に落として flag t を立てる (「測れなかった」を「同じ」に混ぜない)。
-    (let [hs @heads n (count hs)]
+    ;; iteration 18: 8 列目に参照。ns form の alias / refer は file 内で持ち替え、bare 参照は同 file の定義名だけ。
+    (let [hs @heads n (count hs)
+          local-syms (set (map :sym (remove #(= "ns" (:kind %)) hs)))
+          info (volatile! {:aliases {} :refers {}})]
       (vec (map-indexed
             (fn [i {:keys [sym kind line ns nested idx]}]
               (let [end (if (< (inc i) n) (:idx (nth hs (inc i))) (count text))
-                    span (subs text idx end)
-                    [h tflag] (definition-hash span)]
-                (str sym "\t" kind "\t" rel "\t" line "\t" ns "\t" (str (if nested "n" "") tflag) "\t" h)))
+                    span (subs text idx end)]
+                (if (= kind "ns")
+                  (do (vreset! info (ns-info span))
+                      (let [[h tflag] (let [r (structural-hash span)] (if r [(first r) ""] [(content-hash span) "t"]))]
+                        (str sym "\t" kind "\t" rel "\t" line "\t" ns "\t" (str (if nested "n" "") tflag) "\t" h "\t")))
+                  (let [[h tflag refs] (definition-hash span @info local-syms)]
+                    (str sym "\t" kind "\t" rel "\t" line "\t" ns "\t" (str (if nested "n" "") tflag) "\t" h "\t" (str/join "," refs))))))
             hs)))))
 
 (defn- build-index
@@ -567,9 +625,10 @@
             kvs))))
 
 (defn- parse-row [line]
-  (let [[sym kind file ln ns flags hash] (str/split line #"\t")]
+  (let [[sym kind file ln ns flags hash refs] (str/split line #"\t")]
     {:sym sym :kind kind :file file :line (js/parseInt ln 10) :ns (or ns "")
-     :nested (str/includes? (or flags "") "n") :text-fallback (str/includes? (or flags "") "t") :hash (or hash "")}))
+     :nested (str/includes? (or flags "") "n") :text-fallback (str/includes? (or flags "") "t") :hash (or hash "")
+     :refs (if (seq refs) (str/split refs #",") [])}))
 
 (defn- refuse
   "拒否は理由を印字して 2 を返す。理由の literal は test が pin する。"
@@ -742,6 +801,162 @@
     (when (seq near)
       (println (str "  near (by fragment " (str/join "," parts) "): " (str/join " " near)))
       (println "  → find <one of them>   (0 hits is not 'undefined'; symbols may be spelled differently)"))))
+
+;; ---------------------------------------------------------------- dependents / closure (iteration 18)
+(defn- scan-lines
+  "TSV 本文を正規表現 (行全体、gm) で走査して parse-row の列を返す。"
+  [text re-src]
+  (let [re (js/RegExp. re-src "gm") out (volatile! [])]
+    (loop []
+      (when-let [m (.exec re text)]
+        (vswap! out conj (parse-row (aget m 0)))
+        (recur)))
+    @out))
+
+(defn- direct-dependents
+  "keys: [[ns sym] ...] → それを参照する行 (8 列目に bare sym が同 ns で在る、または ns/sym が在る)。
+  1 step を 2 本の正規表現 (bare / qualified) で走査し、key は 300 個ずつ chunk にする。"
+  [text keys]
+  (let [col "[^\t\n]*"
+        bare (fn [[ns sym]] (str (escape-re ns) "\t" col "\t" col "\t(?:" col ",)?" (escape-re sym) "(?:," col ")?$"))
+        qual (fn [[ns sym]] (escape-re (str ns "/" sym)))
+        rows (volatile! [])]
+    (doseq [chunk (partition-all 300 keys)]
+      (vswap! rows into (scan-lines text (str "^(?:" col "\t){4}(?:" (str/join "|" (map bare chunk)) ")")))
+      (vswap! rows into (scan-lines text (str "^(?:" col "\t){7}(?:" col ",)?(?:" (str/join "|" (map qual chunk)) ")(?:," col ")?$"))))
+    (->> @rows (remove #(= "ns" (:kind %))) (distinct))))
+
+(defn- cmd-dependents
+  "find <sym|ns/sym> --dependents [--depth N|all]: この定義を参照する定義を、深さごとに列挙する。
+  『X を変えたら見直すべき定義』を 1 call で。写しは hash で畳む。exit 1 = 被依存 0 件。"
+  [term args]
+  (let [{:keys [header text error]} (load-index-text)]
+    (if error
+      (refuse error)
+      (let [depth-arg (let [i (.indexOf (to-array args) "--depth")] (when (and (>= i 0) (< (inc i) (count args))) (nth args (inc i))))
+            max-depth (cond (nil? depth-arg) 2 (= depth-arg "all") 1000 :else (js/parseInt depth-arg 10))
+            [ns* leaf] (let [i (.lastIndexOf term "/")] (if (pos? i) [(subs term 0 i) (subs term (inc i))] [nil term]))
+            targets (->> (scan-rows text (escape-re leaf) "")
+                         (remove #(= "ns" (:kind %)))
+                         (filter #(or (nil? ns*) (= ns* (:ns %)))))]
+        (if (empty? targets)
+          (do (println (str "0 definitions named " term " — nothing to depend on")) 1)
+          (let [root-keys (distinct (map (fn [r] [(:ns r) (:sym r)]) targets))
+                seen (volatile! (set root-keys))
+                levels (loop [frontier root-keys d 1 acc []]
+                         (if (or (empty? frontier) (> d max-depth))
+                           acc
+                           (let [rows (->> (direct-dependents text frontier)
+                                           (remove #(@seen [(:ns %) (:sym %)])))
+                                 ;; 写しは [sym kind hash] で畳む (find と同じ)
+                                 folded (->> rows (group-by (fn [{:keys [sym kind hash]}] [sym kind hash])) vals
+                                             (map (fn [g] (assoc (first (sort-by (comp count :file) g)) :copies (dec (count g)))))
+                                             (sort-by (juxt :ns :sym)))
+                                 keys* (distinct (map (fn [r] [(:ns r) (:sym r)]) rows))]
+                             (vswap! seen into keys*)
+                             (recur keys* (inc d) (if (seq folded) (conj acc [d folded]) acc)))))
+                total (reduce + (map (comp count second) levels))
+                total-unfolded (reduce + (map (fn [[_ rows]] (reduce + (map #(inc (:copies %)) rows))) levels))]
+            (println (str "dependents of " (str/join " | " (map (fn [[n s]] (str n "/" s)) root-keys))
+                          ": " total " definitions in " (count levels) " level(s)"
+                          (when (> total-unfolded total) (str " (" (- total-unfolded total) " identical folded)"))
+                          " — depth " (if (>= max-depth 1000) "all" max-depth) (when (< max-depth 1000) "; --depth all for the whole closure")))
+            (age-warning header)
+            (let [limit 60 printed (volatile! 0)]
+              (doseq [[d rows] levels]
+                (println (str "  depth " d " (" (count rows) ")"))
+                (doseq [r rows]
+                  (when (< @printed limit) (vswap! printed inc) (println (str "  " (fmt-hit r)))))
+                (when (> (count rows) (- limit (min limit @printed)))
+                  nil))
+              (when (> total limit)
+                (println (str "  … " (- total limit) " more not listed; narrow with --depth 1 or read the level counts"))))
+            (if (pos? total) 0 1)))))))
+
+(defn- resolve-ref-row
+  "参照文字列 → 行 (memo)。bare は同 ns、ns/sym はその ns。同 repo (path 先頭 3 段) を優先、無ければ最短 path。"
+  [text memo from-row ref]
+  (let [[ns* sym] (let [i (.lastIndexOf ref "/")] (if (pos? i) [(subs ref 0 i) (subs ref (inc i))] [(:ns from-row) ref]))
+        k (str ns* "/" sym)]
+    (if (contains? @memo k)
+      (get @memo k)
+      (let [rows (->> (scan-rows text (escape-re sym) "") (filter #(and (= ns* (:ns %)) (not= "ns" (:kind %)))))
+            repo (repo-of (:file from-row))
+            pick (or (first (sort-by (comp count :file) (filter #(= repo (repo-of (:file %))) rows)))
+                     (first (sort-by (comp count :file) rows)))]
+        (vswap! memo assoc k pick)
+        pick))))
+
+(defn- cmd-closure
+  "closure <ns/sym>: この定義の closure hash (参照先の hash を再帰的に identity に入れた Merkle hash) を
+  その場で計算する。循環 (declare の相互再帰) は SCC を 1 単位で hash する。索引に列は持たない
+  (bench/closure_hash.cljk の全件計算は build の 4 倍かかった)。compile / test 結果の memo key に使う。"
+  [term]
+  (let [{:keys [header text error]} (load-index-text)]
+    (if error
+      (refuse error)
+      (let [[ns* leaf] (let [i (.lastIndexOf term "/")] (if (pos? i) [(subs term 0 i) (subs term (inc i))] [nil term]))
+            roots (->> (scan-rows text (escape-re leaf) "") (remove #(= "ns" (:kind %))) (filter #(or (nil? ns*) (= ns* (:ns %)))))]
+        (cond
+          (empty? roots) (do (println (str "0 definitions named " term)) 1)
+          (and (nil? ns*) (> (count (distinct (map :ns roots))) 1))
+          (refuse (str term " is defined in " (count (distinct (map :ns roots))) " namespaces — say which: "
+                       (str/join " | " (take 6 (distinct (map #(str (:ns %) "/" (:sym %)) roots))))))
+          :else
+          (let [root (first (sort-by (comp count :file) roots))
+                memo (volatile! {})
+                key-of (fn [r] (str (:file r) ":" (:line r)))
+                ;; 到達可能な subgraph を集める (iterative DFS)
+                nodes (volatile! {}) adjacency (volatile! {}) unresolved (volatile! 0)
+                _ (loop [stack [root]]
+                    (when-let [r (peek stack)]
+                      (let [stack (pop stack) k (key-of r)]
+                        (if (contains? @nodes k)
+                          (recur stack)
+                          (let [deps (for [ref (:refs r) :let [d (resolve-ref-row text memo r ref)]]
+                                       (if d d (do (vswap! unresolved inc) nil)))
+                                deps (remove nil? deps)]
+                            (vswap! nodes assoc k r)
+                            (vswap! adjacency assoc k (vec (distinct (map key-of deps))))
+                            (recur (into stack (remove #(contains? @nodes (key-of %)) deps))))))))
+                keys* (vec (keys @nodes))
+                ;; Tarjan (iterative) → SCC 逆位相順
+                sccs (let [index (volatile! {}) low (volatile! {}) on (volatile! #{}) st (volatile! []) c (volatile! 0) out (volatile! [])]
+                       (doseq [v0 keys*]
+                         (when-not (contains? @index v0)
+                           (let [call (volatile! [[v0 0]])]
+                             (vswap! index assoc v0 @c) (vswap! low assoc v0 @c) (vswap! c inc) (vswap! st conj v0) (vswap! on conj v0)
+                             (while (seq @call)
+                               (let [[v i] (peek @call) succ (get @adjacency v [])]
+                                 (if (< i (count succ))
+                                   (let [w (nth succ i)]
+                                     (vswap! call #(conj (pop %) [v (inc i)]))
+                                     (cond (not (contains? @index w))
+                                           (do (vswap! index assoc w @c) (vswap! low assoc w @c) (vswap! c inc) (vswap! st conj w) (vswap! on conj w) (vswap! call conj [w 0]))
+                                           (@on w) (vswap! low assoc v (min (@low v) (@index w)))))
+                                   (do (vswap! call pop)
+                                       (when (seq @call) (let [[p _] (peek @call)] (vswap! low assoc p (min (@low p) (@low v)))))
+                                       (when (= (@low v) (@index v))
+                                         (vswap! out conj (loop [acc []] (let [w (peek @st)] (vswap! st pop) (vswap! on disj w)
+                                                                            (if (= w v) (conj acc w) (recur (conj acc w))))))))))))))
+                       @out)
+                closure (volatile! {})
+                _ (doseq [scc sccs]
+                    (let [members (vec (sort-by (fn [k] [(:hash (@nodes k)) k]) scc))
+                          pos (into {} (map-indexed (fn [i k] [k i]) members))
+                          input (fn [k] (str (:hash (@nodes k)) "|" (str/join "," (sort (map #(if-let [p (pos %)] (str "@" p) (get @closure % "?")) (get @adjacency k []))))))
+                          scc-hash (when (> (count members) 1) (sha10 (str/join "\n" (map input members))))]
+                      (doseq [k members]
+                        (vswap! closure assoc k (if scc-hash (sha10 (str scc-hash "#" (pos k))) (sha10 (input k)))))))
+                rk (key-of root)]
+            (println (str "closure " (:ns root) "/" (:sym root) " — " (:file root) ":" (:line root)
+                          "  #" (get @closure rk) "  (structural #" (:hash root) ")"))
+            (println (str "  definitions in closure: " (count keys*) "  cycles: " (count (filter #(> (count %) 1) sccs))
+                          "  unresolved refs: " @unresolved " (core / interop / not indexed — names only)"))
+            (age-warning header)
+            (doseq [k (get @adjacency rk [])]
+              (let [r (@nodes k)] (println (str "  → " (:ns r) "/" (:sym r) " — " (:file r) ":" (:line r) "  #" (get @closure k)))))
+            0))))))
 
 (defn- cmd-find
   "term [term...] [--in <path-substr>] [--exact]。term が `ns/sym` なら leaf で引いて ns 列で絞る。
@@ -947,6 +1162,8 @@
   (println "  <query> — no subcommand needed: *.cljk / a.b → outline, a.b/c → show, anything else → find")
   (println "  build [--include-worktrees] [--no-prune] [--full] — scan .cljk/.cljc/.cljs/.clj/.kotoba and write the index")
   (println "  find <term|ns/term> [term...] [--in <path-substr>] [--exact] [--unfold] — symbol name search (exit 1 = 0 hits; --unfold lists folded copies)")
+  (println "  find <sym|ns/sym> --dependents [--depth N|all] — definitions that reference it, by depth (what to re-check after a change; exit 1 = none)")
+  (println "  closure <ns/sym> — Merkle closure hash (dependencies' hashes folded in); memo key for compile/test results")
   (println "  show <symbol|ns/symbol> — definition snippet (file:line + context lines)")
   (println "  outline <file-suffix|ns> [--bare] — every definition in a file/namespace with its signature (map before Read)")
   (println "  status — index header (top / built-at / scanned / symbols) and age")
@@ -961,9 +1178,16 @@
                  :full (some #{"--full"} rest-args)})
 
       (= cmd "find")
+      (cond (empty? rest-args) (refuse "find needs at least one term")
+            (some #{"--dependents"} rest-args)
+            (let [terms (remove #(or (str/starts-with? % "--") (re-find #"^\d+$|^all$" %)) rest-args)]
+              (if (empty? terms) (refuse "find --dependents needs a symbol") (cmd-dependents (first terms) rest-args)))
+            :else (cmd-find rest-args))
+
+      (= cmd "closure")
       (if (empty? rest-args)
-        (refuse "find needs at least one term")
-        (cmd-find rest-args))
+        (refuse "closure needs a symbol (e.g. kagami.db/apply-pin-advance)")
+        (cmd-closure (first rest-args)))
 
       (= cmd "show")
       (if (empty? rest-args)
@@ -989,10 +1213,11 @@
             ns? (and (not slash?) (str/includes? cmd ".") (not (str/includes? cmd " ")))
             as (cond file? "outline" slash? (if (re-find #"^[^/]+\.[^/]+/" cmd) "show" "find") ns? "outline" :else "find")]
         (println (str "(interpreted as: " as " " (str/join " " args) ")"))
-        (case as
-          "outline" (cmd-outline cmd {:bare (some #{"--bare"} rest-args)})
-          "show" (cmd-show cmd)
-          (cmd-find args)))
+        (cond
+          (some #{"--dependents"} rest-args) (cmd-dependents cmd rest-args)
+          (= as "outline") (cmd-outline cmd {:bare (some #{"--bare"} rest-args)})
+          (= as "show") (cmd-show cmd)
+          :else (cmd-find args)))
 
       :else
       (usage))))
