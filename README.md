@@ -148,6 +148,17 @@ root corpus の実測: **定義の 41.2% (233,858 / 567,719) は他と本文が�
 agent はこう使う: 変更の有無は `cat` でなく `outline` の hash 比較 (file の 1/5.7)。`find` の
 `(+N identical)` の写しは読まない。stale file の `re-located … body unchanged` なら読み直さない。
 
+### iteration 20 (2026-09-18) — 同 ns 別 file の参照、`closure <file>`、plugin-hermes の memo
+
+- 参照列の穴を塞いだ: bare 参照は「同 file の定義名」でなく「core (sci の `clojure.core` public 674 個 +
+  special form) でも局所でもない unqualified symbol」を持つ。同 ns の別 file にある定義への被依存が引ける。
+  full build user CPU 245 → 254 s (+3.4%)、索引 109 → 113 MB、参照 1.42M → 1.92M 本
+- `closure <file>`: file の全定義の closure を sort して 1 つの hash に。`plugin-hermes` の `kotoba_check` が
+  これを memo key にした (hit 0.39 s / miss 26.7 s、comment 編集は hit・本文編集は miss、index 無しは『keyed
+  していない』と言って走る)。**`amu check` 自身が定義ごとの CID (`kotoba.definition-identity/v1`、dependencies
+  付き) を出している** —— compiler 側と索引側で同じ Merkle を 2 回計算している。揃えるのは open
+- test 126/0、壊し方 2 通り (core 除外を殺す / file closure が定義を見ない) で赤
+
 ### iteration 19 (2026-09-17) — Claude Code の腕、task 形 2 つ、版ずれの誤導
 
 | 腕 | 正解 | tool call | API call | token | file read |
