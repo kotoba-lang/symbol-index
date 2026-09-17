@@ -3,6 +3,7 @@
 ;; (iteration 5, 2026-09-15。結果は measurements.edn の :iteration 5)。
 ;;
 ;;   kbb --backend sci bench/hermes_ab.cljk <condition> <out.json> [--skills symbol-index] [--only q1,q2]
+;;   kbb --backend sci bench/hermes_ab.cljk <condition> <out.json> --regrade   # 保存済み answer を今の表で採点し直す
 ;;
 ;; condition は結果に刻む label。実測した 4 腕:
 ;;   A-baseline   skill 無し・AGENTS.md に symbol-index の記述無し (= 導入前)
@@ -29,9 +30,14 @@
 (def state-db (str (.homedir os) "/.hermes/state.db"))
 (def timeout-ms 600000)
 
+;; 期待 file:line は本機の checkout に固有で、日付とともに古びる (2026-09-15 → 09-17 の 2 日で
+;; 10 件中 4 件が .cljc/.clj → .cljk の改名と 9 行のずれで外れた)。腕を回す前に必ず
+;; `grep -n "(def[a-z-]* <sym>" <path>` で 1 件ずつ確かめ、外れていたら表を直してから回す。
+;; grade は basename (拡張子込み) + 行 ±2 なので、改名は agent の MISS に見える。
+(def queries-verified-on "2026-09-17")
 (def queries
   [{:id "q1" :sym "pin-advance-event"
-    :expect [{:path "orgs/kotoba-lang/kagami/src/kagami/db.cljc" :line 68}]}
+    :expect [{:path "orgs/kotoba-lang/kagami/src/kagami/db.cljk" :line 68}]}
    {:id "q2" :sym "select-quote"
     :expect [{:path "orgs/network-awai/cloud-murakumo/src/cloud_murakumo/compute_market.cljk" :line 199}]}
    {:id "q3" :sym "verify-heartbeat"
@@ -43,10 +49,10 @@
    {:id "q6" :sym "kernel-base"
     :expect [{:path "orgs/kotoba-lang/vmm/kotoba/arm64_boot_core.kotoba" :line 41}]}
    {:id "q7" :sym "write-manifest"
-    :expect [{:path "orgs/kotoba-lang/org-apache-iceberg/src/iceberg/manifest.cljc" :line 98}]}
+    :expect [{:path "orgs/kotoba-lang/org-apache-iceberg/src/iceberg/manifest.cljk" :line 98}]}
    {:id "q8" :sym "capability-catalog" :multi true
-    :expect [{:path "orgs/kotoba-lang/kotoba-sema/src/kotoba/compiler/frontend.cljk" :line 178}
-             {:path "orgs/kotoba-lang/kotoba-component/src/kotoba/component/wasi_contract.clj" :line 62}
+    :expect [{:path "orgs/kotoba-lang/kotoba-sema/src/kotoba/compiler/frontend.cljk" :line 187}
+             {:path "orgs/kotoba-lang/kotoba-component/src/kotoba/component/wasi_contract.cljk" :line 63}
              {:path "orgs/cloud-itonami/cloud-itonami-app/src/cloud/itonami/app/tenant_connection.cljk" :line 20}]}])
 
 (defn prompt-for [{:keys [sym multi]}]
@@ -78,7 +84,9 @@
         args  (map #(str (get-in % [:function :arguments])) calls)
         ;; CLI を実際に呼んだ回数。cache file (.tsv) を grep しただけの call は数えない
         ;; (baseline の agent が .kotoba-cache/symbol-index.tsv を直接 grep した実測)。
-        cli-re #"symbol-index(?:\.cljk)?\s+(?:build|find|show|outline|status)"]
+        ;; iteration 11 以降は subcommand 無し (`symbol-index <sym>`) が正規の呼び方。旧 regex は
+        ;; subcommand を要求していたので 09-17 の腕 D で si=0 と数えた (実際は 2 回呼んでいた)。
+        cli-re #"symbol-index(?:\.cljk)?\s+\S"]
     {:tool-calls (count calls)
      :by-tool (frequencies names)
      :symbol-index-calls (count (filter #(re-find cli-re %) args))
@@ -148,10 +156,45 @@
            tools
            (select-keys g [:correct :full-path :path-only :hits]))))
 
+(defn regrade
+  "--regrade: 走らせ直さずに、保存済み answer (<out-dir>/<condition>-<id>-answer.txt) を今の
+  queries 表で採点し直す。表が古びていた (改名・行ずれ) ときに agent の MISS と表の MISS を
+  分けるため。JSONL の行を上書きせず <out>.regraded.jsonl に書く。"
+  [condition out]
+  (let [out-dir (.dirname path out)
+        ;; 走った行 (JSONL) が在れば session-id を拾い、state.db から tool 列も数え直す
+        ;; (si の計数 regex が古びていたときに再集計できるように)
+        ran (let [f (str out ".jsonl")]
+              (if (.existsSync fs f)
+                (into {} (for [l (str/split-lines (.readFileSync fs f "utf8")) :when (seq l)
+                               :let [r (js->clj (js/JSON.parse l) :keywordize-keys true)]]
+                           [(:id r) r]))
+                {}))
+        rows (for [q queries
+                   :let [f (.join path out-dir (str condition "-" (:id q) "-answer.txt"))
+                         r (get ran (:id q))]]
+               (if (.existsSync fs f)
+                 (let [g (grade (.readFileSync fs f "utf8") (:expect q))]
+                   (merge (select-keys r [:session-id :elapsed-s :total-tokens :input-tokens :output-tokens :api-calls :cost-usd])
+                          (when (:session-id r) (session-tools (:session-id r)))
+                          (select-keys g [:correct :full-path :path-only :hits])
+                          {:id (:id q) :sym (:sym q) :graded-with queries-verified-on}))
+                 {:id (:id q) :sym (:sym q) :missing-answer f}))
+        n (count (filter :correct rows))]
+    (doseq [r rows]
+      (println (str "regrade " condition " " (:id r) " " (:sym r) " → "
+                    (cond (:missing-answer r) "NO-ANSWER-FILE" (:correct r) "OK" (:path-only r) "PATH-ONLY" :else "MISS")
+                    (when (:session-id r) (str " tools=" (:tool-calls r) " si=" (:symbol-index-calls r) " reads=" (:file-reads r)
+                                               " calls=" (:api-calls r) " total=" (:total-tokens r) " t=" (.toFixed (or (:elapsed-s r) 0) 0) "s")))))
+    (.writeFileSync fs (str out ".regraded.jsonl") (str/join "" (map #(str (js/JSON.stringify (clj->js %)) "\n") rows)))
+    (println (str "REGRADED\t" n "/" (count (remove :missing-answer rows)) "\tanswers=" (count (remove :missing-answer rows)) "\ttable=" queries-verified-on))
+    (.exit js/process (if (zero? (count (remove :missing-answer rows))) 2 0))))
+
 (defn parse-args [argv]
   (loop [a argv m {:skills [] :only nil}]
     (cond
       (empty? a) m
+      (= "--regrade" (first a)) (recur (next a) (assoc m :regrade true))
       (= "--skills" (first a)) (recur (nnext a) (update m :skills conj (second a)))
       (= "--only" (first a)) (recur (nnext a) (assoc m :only (set (str/split (second a) #","))))
       (nil? (:condition m)) (recur (next a) (assoc m :condition (first a)))
@@ -160,10 +203,12 @@
 
 (let [argv (vec (drop 1 (rest (.-argv js/process))))
       argv (if (str/ends-with? (first argv "") ".cljk") (vec (rest argv)) argv)
-      {:keys [condition out skills only]} (parse-args argv)]
+      {:keys [condition out skills only regrade?]} (parse-args argv)
+      regrade? (:regrade (parse-args argv))]
   (when-not (and condition out)
-    (println "usage: hermes_ab.cljk <condition> <out.json> [--skills NAME]... [--only q1,q2]")
+    (println "usage: hermes_ab.cljk <condition> <out.json> [--skills NAME]... [--only q1,q2] | <condition> <out.json> --regrade")
     (.exit js/process 2))
+  (when regrade? (regrade condition out))
   (let [out-dir (.dirname path out)
         qs (if only (filter #(only (:id %)) queries) queries)
         results (doall

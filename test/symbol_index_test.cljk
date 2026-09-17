@@ -39,6 +39,11 @@
       (str/includes? argv0 "nbb") ["nbb"]
       :else ["kbb" "--backend" "sci"])))
 
+(defn mk-tmp [tag]
+  (.mkdtempSync fs (.join path (.tmpdir os) (str "symbol-index-" tag "-"))))
+
+(def test-home (mk-tmp "home"))
+
 (defn run
   "script を top で走らせ {:code :out} を返す。第 1 引数が map なら
   {:env {\"K\" \"V\"}} で環境変数を足す (SYMBOL_INDEX_ROOT の check 用)。"
@@ -49,6 +54,10 @@
         env (js/Object.assign #js{} (.-env js/process))
         _ (js-delete env "CLAUDE_PROJECT_DIR")
         _ (js-delete env "SYMBOL_INDEX_ROOT")
+        ;; iteration 16: build は ~/.kotoba-cache/symbol-index-roots に root を記録し、find は cwd に
+        ;; 索引が無いときそこへ fallback する。test が本物の $HOME を汚さない / 本物の登録簿に
+        ;; 影響されないよう、test 全体で 1 つの空の HOME を使う (登録簿を試す test は自前の HOME を渡す)
+        _ (aset env "HOME" test-home)
         _ (doseq [[k v] (:env opts)] (aset env k v))
         r (.spawnSync cp bin (clj->js (concat pre [script] args))
                       #js{:cwd top :encoding "utf8" :env env})]
@@ -70,8 +79,6 @@
                       (if (> (count detail) 1500) (str (subs detail 0 1500) "\n  … (" (count detail) " chars)") detail)))
         (vswap! failed conj label))))
 
-(defn mk-tmp [tag]
-  (.mkdtempSync fs (.join path (.tmpdir os) (str "symbol-index-" tag "-"))))
 
 ;; ------------------------------------------------------------------ fixture
 
@@ -226,7 +233,7 @@
             (and (re-find #"(?m)^  1\| \(ns a.core\)" out) (re-find #"(?m)^  8\| " out) (not (re-find #"(?m)^  9\| " out))) out))
   (let [{:keys [code out]} (run top "find" "same-name")]
     (check! "identical copies (same content hash, .clj vs .cljc) fold into one row with +N identical"
-            (and (re-find #"2 hits for same-name \(1 identical folded\)" out)
+            (and (re-find #"2 hits for same-name \(1 identical folded; --unfold lists them\)" out)
                  (re-find #"(?m)^  defn same-name — orgs/b/src/b/core.cljc:2  #[0-9a-f]{10}  \(\+1 identical\)$" out)) out)
     (check! "find with 2 hits prints both snippets, each under its own == header"
             (and (= 0 code) (= 2 (count (re-seq #"(?m)^== defn same-name — " out)))
@@ -250,6 +257,7 @@
   (let [{:keys [code out]} (run top "find" "pad")]
     ;; edge.cljk の最後の (def pad 1) は span に末尾の ; 詰め物を含む。v3 (text hash) では別行だったが、
     ;; v4 (構造 hash) では comment は identity に入らないので 1 行に畳む (iteration 15)
+    ;; 定義が 1 つなら --unfold の誘いは出さない (2 つ以上のときだけ。same-name の test が対になる)
     (check! "identical (def pad 1) fold into one row by structural hash, even the one whose span carries trailing comments"
             (and (= 0 code) (re-find #"1 hits for pad \(\d+ identical folded\)" out)
                  (re-find #"(?m)^  def pad — edge.cljk:1  #[0-9a-f]{10}  \(\+\d+ identical\)$" out)) out))
@@ -356,9 +364,10 @@
     (write! root "src/r/core.cljk" "(ns r.core)\n(defn root-only-fn [] 1)\n")
     (write! root "src/r/deep/leaf.cljk" "(ns r.deep.leaf)\n")
     (write! elsewhere "y.cljk" "(defn elsewhere-fn [] 1)\n")
-    (let [{:keys [code out]} (run elsewhere "find" "elsewhere-fn")]
-      (check! "Q2: find with no index REFUSE exit 2 (does not auto-build)"
-              (and (= 2 code) (re-find #"(?m)^REFUSE\tno index at .* — run `symbol-index build`" out)) out)
+    ;; 登録簿が空の HOME で (共有 test-home には先の build の root が溜まっている)
+    (let [{:keys [code out]} (run elsewhere {:env {"HOME" (mk-tmp "empty-home")}} "find" "elsewhere-fn")]
+      (check! "Q2: find with no index and no known root REFUSE exit 2 (cd first; build last, never in $HOME)"
+              (and (= 2 code) (re-find #"(?m)^REFUSE\tno index at .* — cd to the project root and retry \(or set SYMBOL_INDEX_ROOT\); only if the root itself has no index, run `symbol-index build` there \(never in \$HOME\)" out)) out)
       (check! "Q2: find with no index leaves no index behind"
               (not (.existsSync fs (.join path elsewhere ".kotoba-cache" "symbol-index.tsv"))) ""))
     (run root "build")
@@ -474,6 +483,42 @@
       (build! "(ns a)\n(defn f [x] (+ 1 x))\n(def one 1)\n(def two 1)\n(def s \"one two\")\n(def pats #{#\"x\" #\"y\" #\"z\"})\n(def broken \"unterminated\n")
       (check! "swapping argument order in the body changes the hash" (not= f0 (hash-of "f")) (str f0 " vs " (hash-of "f"))))))
 
+(defn test-known-roots []
+  ;; iteration 16: build が root を登録簿 ($HOME/.kotoba-cache/symbol-index-roots) に記録し、cwd にも祖先にも
+  ;; 索引が無いとき、登録簿の root がちょうど 1 つならそれで答える (build はしない)。2 つ以上なら列挙して拒否。
+  (let [home (mk-tmp "roots-home") proj (mk-tmp "roots-proj") proj2 (mk-tmp "roots-proj2") elsewhere (mk-tmp "roots-elsewhere")
+        env {"HOME" home}
+        roots-file (.join path home ".kotoba-cache" "symbol-index-roots")]
+    (write! proj "src/p/core.cljk" "(ns p.core)\n(defn known-root-fn [] 1)\n(defn known-root-fn [] 1)\n")
+    (write! proj "src/p/other.cljk" "(ns p.other)\n(defn known-root-fn [] 1)\n")
+    (let [{:keys [code out]} (run proj {:env env} "build")]
+      (check! "build records its root in $HOME/.kotoba-cache/symbol-index-roots"
+              (and (= 0 code) (.existsSync fs roots-file)
+                   (= (.realpathSync fs proj) (str/trim (.readFileSync fs roots-file "utf8")))) (str out (try (.readFileSync fs roots-file "utf8") (catch :default _ "NO-FILE")))))
+    (let [{:keys [code out]} (run elsewhere {:env env} "find" "known-root-fn")]
+      (check! "find from a cwd without an index answers from the single known root and says so on line 1"
+              (and (= 0 code) (re-find #"(?m)^\(using index root .* — cwd .* has none; cd there or set SYMBOL_INDEX_ROOT to silence this\)$" out)
+                   (re-find #"1 hits for known-root-fn \(2 identical folded\)" out)) out)
+      (check! "the fallback does not build anything in the cwd"
+              (not (.existsSync fs (.join path elsewhere ".kotoba-cache" "symbol-index.tsv"))) ""))
+    (let [{:keys [code out]} (run elsewhere {:env env} "find" "known-root-fn" "--unfold")]
+      (check! "find --unfold lists each folded copy as file:line under the representative"
+              (and (= 0 code) (re-find #"\(2 identical folded, listed\)" out)
+                   (re-find #"(?m)^      = src/p/core.cljk:3$" out) (re-find #"(?m)^      = src/p/other.cljk:2$" out)) out))
+    (let [{:keys [code out]} (run elsewhere {:env env} "build")]
+      (check! "an explicit build in a cwd without an index still builds there (fallback is read-only)"
+              (and (= 2 code) (re-find #"scanned 0 files under" out)) out))
+    ;; 2 つ目の root を登録 → 曖昧なので拒否 (両方を列挙)
+    (write! proj2 "src/q.cljk" "(ns q)\n(defn other-root-fn [] 1)\n")
+    (run proj2 {:env env} "build")
+    (let [{:keys [code out]} (run elsewhere {:env env} "find" "known-root-fn")]
+      (check! "two known roots: REFUSE and list both (no guessing between trees)"
+              (and (= 2 code) (re-find #"(?m)^REFUSE\tno index at .* — cd to an indexed root and retry \(or set SYMBOL_INDEX_ROOT\): .*roots-proj2.* \| .*roots-proj.*\. Do not build here\." out)) out))
+    ;; 登録簿の root が消えたら候補から外れる
+    (.rmSync fs (.join path proj2 ".kotoba-cache") #js{:recursive true :force true})
+    (let [{:keys [code]} (run elsewhere {:env env} "find" "known-root-fn")]
+      (check! "a registered root whose index is gone is ignored (back to the single root)" (= 0 code) ""))))
+
 (defn test-stale-json []
   (let [top (mk-tmp "json")]
     (write! top "x.cljk" "(defn foo [] 1)\n")
@@ -499,6 +544,7 @@
   (test-incremental)
   (test-content-hash)
   (test-structural-hash)
+  (test-known-roots)
   (test-no-index-and-root-discovery)
   (test-stale-json))
 

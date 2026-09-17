@@ -465,4 +465,45 @@
                  {:broke "fallback の flag t を立てない" :red "unparsable definition falls back to text hash with flag t"}]
   :tests "94/0 (v3 の『詰め物 comment で別行』は v4 で 1 行に畳む期待に反転)"
   :not-measured ["agent 側 (hermes) の call 数 / token" "参照先 hash の Merkle 化" "macro 展開後の同一性"]
+  :verdict :landed}
+
+ ;; ---- iteration 16 (2026-09-17) — agent 側の実測 (Hermes 腕 D / E / F)。Co-Scientist: 観測 → 仮説 → A/B → 着地 → 反証 ----
+ ;; 再現: export PATH=$HOME/.hermes/hermes-agent/venv/bin:$PATH; cd <superproject>;
+ ;;       kbb --backend sci orgs/kotoba-lang/symbol-index/bench/hermes_ab.cljk <arm> <out.json> --skills symbol-index
+ ;;       採点し直し: … <arm> <out.json> --regrade   (表は queries-verified-on の日付で grep -n 確認済み)
+ ;; 09-15 の腕 C とは日が違い API 1 call の壁時計が 9 s → 70–100 s (provider 側)。壁時計は日を跨いで比べない。
+ {:iteration 16 :id :h37-agent-side-arm-d
+  :date "2026-09-17"
+  :observation "iteration 7–15 の効果は agent 側で未測定 (README『固定点』)。hermes は ~/.hermes/hermes-agent/venv/bin にあり、この機で回せた"
+  :bench-defects-found-first [{:what "query 表の期待 file:line が 2 日で 10 件中 4 件古びた (.cljc/.clj → .cljk の改名 3、+9 行 1)。grade は basename 拡張子込みなので agent の MISS に見える" :fix "表を 09-17 で再確認 (queries-verified-on) + --regrade (保存済み answer を今の表で採点し直し、state.db から tool 列も数え直す)"}
+                              {:what "symbol-index-calls の regex が subcommand を要求し、iteration 11 以降の `symbol-index <sym>` を 0 と数えた" :fix "regex を `symbol-index\\s+\\S` に"}]
+  :arm-D {:condition "D-iter15-v4: v4 索引 + skill 先読み (09-15 と同じ skill 本文)" :n 8
+          :correct "7/8 (再採点。古い表では 5/8)" :timeouts 1
+          :total-tok-mean 72798 :api-mean 4.0 :tool-calls-mean 3.1 :si-mean 2.9 :file-reads 0 :wall-mean-s 280 :s-per-api-call 70
+          :finding "8 query 中 7 が hermes の terminal cwd = $HOME から呼び、`REFUSE no index at ~/.kotoba-cache` を受けた。6 が拒否文の『run `symbol-index build`』に従って build を走らせた (1 query あたり +1.1 tool call、+43% token)。q8 (multi-hit) は『(N identical folded)』の写しの file:line を TSV の awk/grep で出そうとして 600 s 時間切れ。file read は 0 (iteration 7 の snippet が効いている = H24 は agent 側で確認)"}
+  :arm-E {:condition "E-skill-rule0: D + skill に規則 0『最初の 1 回から project root で引く (cd か SYMBOL_INDEX_ROOT)』" :n 8
+          :correct "7/8" :timeouts 1
+          :total-tok-mean 46269 :api-mean 2.5 :tool-calls-mean 1.8 :si-mean 1.4 :file-reads 0 :wall-mean-s 257 :s-per-api-call 103
+          :finding "$HOME REFUSE は 8/8 で消えた。single-hit の 7 query は全部 1 tool / 2 API call (最良形)。q8 は今度も時間切れ: `--all` (無い) → superproject 全体を grep -rn (180 s timeout) → cache を探る。畳んだ写しを 1 call で出す口が無いのが原因"}
+  :ratios-E-vs-D {:total-tok 1.57 :api-calls 1.6 :tool-calls 1.7 :correct "7/8 → 7/8"}
+  :landed-as-iteration-16 ["build が root を ~/.kotoba-cache/symbol-index-roots に記録。cwd にも祖先にも索引が無いとき、登録簿の root がちょうど 1 つならそれで答えて 1 行目に注記 (読むだけ、build しない)。2 つ以上なら列挙して REFUSE"
+                           "REFUSE 文を cd 先頭に (『build』は最後、$HOME では決してしない)"
+                           "find --unfold で畳んだ写しの file:line を列挙。fold 行に『--unfold lists them』"
+                           "skill: 規則 0 + 『写しの場所が要るなら --unfold、TSV を自分で grep しない』"
+                           "test は隔離した HOME で走る (本物の登録簿を汚さない / 影響されない)。101/0、壊し方 3 通り (fallback / 登録簿 / --unfold) で名指しの test が赤"]
+  :arm-F "下の :h38 (iteration 16 の script + skill を入れて同じ 8 query)"
+  :verdict :landed}
+
+ {:iteration 16 :id :h38-agent-side-arm-f
+  :date "2026-09-17"
+  :hypothesis "iteration 16 (登録簿 fallback + cd 先頭の REFUSE + --unfold) と skill (規則 0 + --unfold) を入れると、腕 E で残った q8 (multi-hit) の時間切れが消え、single-hit は 1 tool のまま"
+  :arm-F {:condition "F-iter16: worktree の script に symlink を向け、skill も同じ版を install" :n 8
+          :correct "8/8" :timeouts 0
+          :total-tok-mean 46060 :api-mean 2.5 :tool-calls-mean 1.5 :si-mean 1.2 :file-reads 0 :wall-mean-s 299 :s-per-api-call 120
+          :q8 "find → find --unfold の 2 tool / 3 API call で 6 件 (3 定義 + 写し 3) を file:line 付きで答えた (D / E は 600 s 時間切れ)"
+          :finding "q2 (single-hit、写し 1) が fold 行の『--unfold lists them』に誘われて --unfold → 写しの sed まで行き 3 tool (+2)。q5 は確認の sed (+1、prompt の『読んで確かめよ』に従った揺れ)"}
+  :fixed-after-F "fold 行の --unfold の誘いは定義が 2 つ以上のときだけ出す (単一 hit は『(+N identical)』だけ)。test 101/0 (pad: 誘い無し / same-name: 誘い有り の対)"
+  :summary-D-E-F {:correct ["7/8" "7/8" "8/8"] :timeouts [1 1 0] :tool-calls-mean [3.1 1.8 1.5] :api-mean [4.0 2.5 2.5] :total-tok-mean [72798 46269 46060] :file-reads [0 0 0]
+                  :vs-C-2026-09-15 "C は 8/8・tool 2.0・api 3.0・total 50,740 (file read 8/8 で 1 回)。F は tool 1.5・api 2.5・46,060・file read 0 —— iteration 7 の snippet (H24) が agent 側で効いた。壁時計は日を跨いで比べない (API 1 call 9 s → 120 s)"}
+  :not-measured ["hermes 以外の agent (Claude Code の Bash 経由)" "8 query 以外の task 形 (編集・複数 file の理解)" "登録簿 fallback を hermes が実際に踏む回数 (F では skill の規則 0 で cd したので fallback は 0 回。fallback は規則を忘れた agent の保険)"]
   :verdict :landed}]

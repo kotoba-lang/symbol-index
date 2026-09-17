@@ -22,11 +22,16 @@ symbol-index build            # 索引生成 (incremental。--full で全読み)
 
 ## 判断の規則 (これだけ守れば think と call が減る)
 
+0. **最初の 1 回から project root で引く。** `cd <project root> && symbol-index <sym>` か
+   `SYMBOL_INDEX_ROOT=<project root>`。cwd に索引が無いとき、build 済みの root が 1 つだけなら
+   そこで答えて 1 行目に `(using index root …)` と出す。2 つ以上なら `REFUSE` で候補を列挙する ——
+   **その場で `build` しない** (拒否文に従って build した 6/8 が 1 query あたり +1 call だった)。
 1. **file を cat / Read する前に outline を引く。** outline は file の 1/5.7 の chars。
 2. **exit code で次を決める。** 0 = hit。1 = 測って 0 件 (near の提案を引き直す。0 件は「無い」ではない)。
    2 = 拒否 (`REFUSE\t<理由>`: 索引が無い / top が違う / 旧形式 → `status` を見て `build`)。
 3. **hit が 40 件超なら repo 別件数表が出る。** `--in <repo-path>` か `<ns>/<sym>` で 1 手で絞る。
-4. **`(+N identical)` の写しは読まない。** 同じ content hash = 同じ本文。
+4. **`(+N identical)` の写しは読まない。** 同じ構造 hash = 同じ本文。写しの file:line 自体が要る
+   ときは `symbol-index find <sym> --unfold` (1 call)。TSV を自分で grep / awk しない。
 5. **変更の有無は hash で確かめる。** outline / find / show の `#xxxxxxxxxx` が前と同じなら本文は同じ。
    `re-located … body unchanged` なら読み直さない。`body changed → #new` のときだけ読む。
 6. **索引より新しい file は自動で再走査される** (行番号は合う)。`build` は日次で十分。
@@ -36,7 +41,7 @@ symbol-index build            # 索引生成 (incremental。--full で全読み)
 - full-file read 平均 6,580 tok/query → symbol + snippet 122 tok (54 倍)
 - Hermes Agent A/B (8 query): skill 先読みで 8/8 正解・token 2.7 分の 1・API call 2.5 分の 1・壁時計 1/10。
   **置くだけでは agent が選ぶのは 2/8** —— 先読み (`hermes chat -s symbol-index`) まで含めて導入。
-- 定義の 41.2% は他の定義と本文が同一 (root corpus)。
+- 定義の 45.8% は他の定義と本文 (構造 hash: 名前・局所束縛・comment・docstring を除いた form) が同一 (root corpus、v4)。
 
 ## 導入
 
