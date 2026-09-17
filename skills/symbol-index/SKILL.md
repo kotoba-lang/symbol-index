@@ -16,6 +16,8 @@ symbol-index <ns>/<sym>       # show: その ns の定義の冒頭
 symbol-index <file.cljk>      # outline: file の定義一覧 (行番号 + signature + #hash)
 symbol-index <ns.name>        # outline: ns の定義一覧
 symbol-index find <t> --in <path> | --exact   # 多いときの絞り込み
+symbol-index find <sym> --dependents [--depth N|all]   # X を変えたら見直すべき定義 (被依存) を深さ別に (1 call)
+symbol-index closure <ns/sym>  # Merkle closure hash (依存先の本文まで含む identity)。compile / test 結果の memo key
 symbol-index status           # 索引の素性 (top / built-at / symbols / pruned)
 symbol-index build            # 索引生成 (incremental。--full で全読み)
 ```
@@ -34,6 +36,10 @@ symbol-index build            # 索引生成 (incremental。--full で全読み)
    ときは `symbol-index find <sym> --unfold` (1 call)。TSV を自分で grep / awk しない。
 5. **変更の有無は hash で確かめる。** outline / find / show の `#xxxxxxxxxx` が前と同じなら本文は同じ。
    `re-located … body unchanged` なら読み直さない。`body changed → #new` のときだけ読む。
+   構造 hash は名前・局所変数名・comment・docstring・空白を含まない (本文の form だけ)。
+   依存先まで含めた同一性が要るなら `closure <ns/sym>` (依存先の本文が変われば変わる)。
+5b. **定義を変える前に `find <sym> --dependents`。** 参照している定義を深さ別に出す (test も含む)。
+   grep で被参照を探さない (alias 経由の `a/sym` は grep に映らない)。
 6. **索引より新しい file は自動で再走査される** (行番号は合う)。`build` は日次で十分。
 
 ## 数値 (実測、正本は repo の measurements.edn)

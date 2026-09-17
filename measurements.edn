@@ -532,4 +532,23 @@
                  {:broke "SCC を 1 単位にしない (member ごと)" :red "dependent unchanged: c.core/b (相互再帰 fixture)"}]
   :not-measured ["macro 展開後の参照 (展開前の symbol で解決している)" "closure hash を索引の列に足したときの build cost (bench は 20 min: 索引 build の 4 倍。SCC と閉包を incremental に更新する設計が要る)" "memo key として使ったときの hit 率 (compile 結果の cache は未実装)"]
   :verdict :measured-not-landed
-  :next "索引に closure 列を足すかは build cost 次第。先に『変更した定義の推移的被依存を列挙する』query (find --dependents) を索引の参照グラフから出す方が agent には直接効く (どこを見直せばよいか、を 1 call で)"}]
+  :next "索引に closure 列を足すかは build cost 次第。先に『変更した定義の推移的被依存を列挙する』query (find --dependents) を索引の参照グラフから出す方が agent には直接効く (どこを見直せばよいか、を 1 call で)"}
+
+ ;; ---- iteration 18 (2026-09-17) — 参照列 (v5) + find --dependents + closure (on-demand)。着地 ----
+ ;; 再現: cd <superproject>; /usr/bin/time -p kbb --backend sci scripts/symbol-index.cljk build --full
+ ;;       kbb --backend sci scripts/symbol-index.cljk find kagami.db/apply-pin-advance --dependents --depth all
+ ;;       kbb --backend sci scripts/symbol-index.cljk closure kagami.db/apply-pin-advance
+ {:iteration 18 :id :h40-refs-dependents-closure
+  :date "2026-09-17"
+  :observation ":h39 の closure hash を列にすると build の 4 倍。agent に直接効くのは『X を変えたら見直す定義』の列挙で、それは参照グラフだけで出る"
+  :design "8 列目 = 参照 (同 file の bare / alias・refer 経由の ns/sym / 完全修飾)。解決は query 時: --dependents は 8 列目を正規表現で走査する BFS、closure は到達 subgraph を集めて Tarjan SCC → :h39 と同じ hash"
+  :measured {:full-build {:v4-user-s 237.9 :v5-user-s 245.4 :real-s 287 :load 13.6 :note "+3% (parse は v4 で済んでいる。足したのは ns form 1 回の parse と symbol の walk)"}
+             :index-bytes {:v4 80676879 :v5 109464263} :rows-with-refs 384556 :refs-total 1422606
+             :query {:dependents-depth2-s 2.87 :dependents-all-s 2.88 :closure-s 0.92 :example "kagami.db/apply-pin-advance: 被依存 7 (bin の cmd-* 3 + deftest 4)、closure 2 定義"}}
+  :tests "116/0"
+  :falsified-by [{:broke "参照列を空にする" :red "refs: bare same-file reference (+4)"}
+                 {:broke "BFS を 1 段で止める" :red "--depth all walks the transitive closure through the mutual recursion"}
+                 {:broke "closure が依存先の hash を入れない" :red "changing a leaf dependency changes the closure of the root (+ SCC partner)"}]
+  :known-gaps ["同 ns の別 file の定義への bare 参照は落ちる (file 単位で local-syms を決めている)" "alias 先が索引に無い ns (clojure.string 等) の参照は列に残る (query 時に解決できず落ちるだけ)" "macro 展開後の参照は見ない"]
+  :not-measured ["agent 側 (--dependents を含む task 形での A/B、次の :h41)"]
+  :verdict :landed}]

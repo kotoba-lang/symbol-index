@@ -148,6 +148,19 @@ root corpus の実測: **定義の 41.2% (233,858 / 567,719) は他と本文が�
 agent はこう使う: 変更の有無は `cat` でなく `outline` の hash 比較 (file の 1/5.7)。`find` の
 `(+N identical)` の写しは読まない。stale file の `re-located … body unchanged` なら読み直さない。
 
+### iteration 18 (2026-09-17) — 参照列 (v5)、`find --dependents`、`closure`
+
+iteration 17 の closure hash を索引の列にはせず、**参照だけを 8 列目に持ち、解決は query 時**にした。
+参照は 3 種だけ (同 file の定義名 / `:require` の alias・refer 経由の `ns/sym` / 完全修飾)。core・interop・
+索引外の lib は名前を持たない。同 ns の別 file にある定義への bare 参照は落ちる (設計上の穴)。
+
+- `find <sym> --dependents [--depth N|all]` — 参照している定義を深さ別に (BFS、写しは hash で畳む)。
+  「X を変えたら見直すべき定義」を 1 call で。root corpus で 2.9 s (109 MB を正規表現で 2 本走査 / 段)
+- `closure <ns/sym>` — その場で Merkle closure hash (到達可能な subgraph を集め、SCC は 1 単位)。0.9 s。
+  compile / test 結果の memo key に使う (依存先の本文が変われば変わる、無関係は変わらない)
+- build cost: full build user CPU 238 s → 245 s (+3%)、索引 80 MB → 109 MB (384,556 行が参照を持ち 1.42M 本)
+- test 116/0、壊し方 3 通り (参照列を空に / BFS を 1 段に / closure が依存先を入れない) で名指しの test が赤
+
 ### iteration 17 (2026-09-17) — closure hash (Merkle、測定のみ)
 
 構造 hash は参照先が変わっても変わらない。`bench/closure_hash.cljk` で参照 symbol を参照先の hash に
@@ -231,7 +244,7 @@ bin/symbol-index outline kagami.db
 bin/symbol-index status
 ```
 
-`build` は `.kotoba-cache/symbol-index.tsv` (v4、gitignore 推奨) に落とす。
+`build` は `.kotoba-cache/symbol-index.tsv` (v5、gitignore 推奨) に落とす。
 `find` / `show` / `outline` は**索引が無ければ REFUSE する** (exit 2、自動 build
 しない —— iteration 3 で Hermes Agent に導入したとき、agent の terminal が `$HOME`
 に居る状態で呼ばれ、home 全体を build しに行って tool の 120s timeout に当たった

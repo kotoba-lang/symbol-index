@@ -187,15 +187,15 @@
       (check! "gitignored generated dir absent"
               (not (re-find #"only-in-generated" idx)) idx))
     (check! "inline reader-cond and shallow-indent defs indexed as nested"
-            (and (re-find #"(?m)^inline-cond\tdefn\t[^\n]*\tn\t[0-9a-f]{10}$" idx)
-                 (re-find #"(?m)^nested-fn\tdefn\t[^\n]*\tn\t[0-9a-f]{10}$" idx))
+            (and (re-find #"(?m)^inline-cond\tdefn\t[^\n]*\tn\t[0-9a-f]{10}\t[^\n]*$" idx)
+                 (re-find #"(?m)^nested-fn\tdefn\t[^\n]*\tn\t[0-9a-f]{10}\t[^\n]*$" idx))
             idx)
     (check! "multi-line ^{:doc} metadata: name and the (def line, not the name's line"
-            (re-find #"(?m)^multiline-meta\tdef\torgs/a/src/a/core.cljk\t13\ta.core\t\t[0-9a-f]{10}$" idx) idx)
+            (re-find #"(?m)^multiline-meta\tdef\torgs/a/src/a/core.cljk\t13\ta.core\t\t[0-9a-f]{10}\t[^\n]*$" idx) idx)
     (check! "blank lines before a def do not turn it into nested"
-            (re-find #"(?m)^multiline-meta\tdef\t[^\n]*\t\t[0-9a-f]{10}$" idx) idx)
+            (re-find #"(?m)^multiline-meta\tdef\t[^\n]*\t\t[0-9a-f]{10}\t[^\n]*$" idx) idx)
     (check! "reader-cond split over two lines: line is the (defn line, nested"
-            (re-find #"(?m)^split-cond\tdefn\torgs/a/src/a/core.cljk\t7\ta.core\tn\t[0-9a-f]{10}$" idx) idx)
+            (re-find #"(?m)^split-cond\tdefn\torgs/a/src/a/core.cljk\t7\ta.core\tn\t[0-9a-f]{10}\t[^\n]*$" idx) idx)
     (check! "prune keeps the repo's src and drops only the pruned group"
             (and (re-find #"kept-in-pruned-repo" idx) (not (re-find #"lost-after-budget" idx))) idx)
     (check! "pruned group is named in the header"
@@ -204,7 +204,7 @@
     (check! "4+ space indent is not indexed"
             (not (re-find #"deep-string-def" idx)) idx)
     (check! "ns column filled from the file's (ns …)"
-            (re-find #"(?m)^same-name\tdefn\torgs/b/src/b/core.cljc\t2\tb.core\t\t[0-9a-f]{10}$" idx) idx))
+            (re-find #"(?m)^same-name\tdefn\torgs/b/src/b/core.cljc\t2\tb.core\t\t[0-9a-f]{10}\t[^\n]*$" idx) idx))
   (let [{:keys [code out]} (run top "find" "same-name")]
     (check! "find hit exit 0 with 2 hits" (and (= 0 code) (re-find #"2 hits" out)) out))
   (let [{:keys [code out]} (run top "find" "SAME-NAME")]
@@ -406,7 +406,7 @@
     (write! top "a/one.cljk" "(ns one)\n(defn f1 [] 1)\n(defn f1-added [] 3)\n")
     (let [{:keys [out]} (run top "build") idx (idx-file)]
       (check! "changed file is re-scanned, the other served from cache"
-              (and (re-find #"(?m)^CACHED-FILES\t1\tof 2$" out) (re-find #"(?m)^f1-added\tdefn\ta/one.cljk\t3\tone\t\t[0-9a-f]{10}$" idx)) (str out idx)))
+              (and (re-find #"(?m)^CACHED-FILES\t1\tof 2$" out) (re-find #"(?m)^f1-added\tdefn\ta/one.cljk\t3\tone\t\t[0-9a-f]{10}\t[^\n]*$" idx)) (str out idx)))
     ;; 2) 新 file の追加 → 親 dir の mtime が変わり readdir し直す
     (write! top "b/three.cljk" "(defn f3 [] 3)\n")
     (let [{:keys [out]} (run top "build") idx (idx-file)]
@@ -423,7 +423,7 @@
 (defn test-content-hash []
   (let [top (mk-tmp "hash")
         idx (fn [] (.readFileSync fs (.join path top ".kotoba-cache" "symbol-index.tsv") "utf8"))
-        hash-of (fn [sym] (second (re-find (js/RegExp. (str "^" sym "\\t[^\\n]*\\t([0-9a-f]{10})$") "m") (idx))))]
+        hash-of (fn [sym] (second (re-find (js/RegExp. (str "^" sym "\\t[^\\n]*\\t([0-9a-f]{10})\\t[^\\n]*$") "m") (idx))))]
     (write! top "a.cljk" "(ns a)\n(defn f [x]\n  (+ x 1))\n(defn g [] 2)\n")
     (run top "build")
     (let [f0 (hash-of "f") g0 (hash-of "g")]
@@ -453,12 +453,12 @@
   (let [top (mk-tmp "shash")
         idx (fn [] (.readFileSync fs (.join path top ".kotoba-cache" "symbol-index.tsv") "utf8"))
         row (fn [sym] (re-find (js/RegExp. (str "^" sym "\\t[^\\n]*$") "m") (idx)))
-        hash-of (fn [sym] (second (re-find (js/RegExp. (str "^" sym "\\t[^\\n]*\\t([0-9a-f]{10})$") "m") (idx))))
+        hash-of (fn [sym] (second (re-find (js/RegExp. (str "^" sym "\\t[^\\n]*\\t([0-9a-f]{10})\\t[^\\n]*$") "m") (idx))))
         flags-of (fn [sym] (nth (str/split (row sym) #"\t") 5))
         build! (fn [src] (write! top "a.cljk" src) (run top "build" "--full"))]
     (build! "(ns a)\n(defn f [x] (+ x 1))\n(def one 1)\n(def two 1)\n(def s \"one two\")\n(def pats #{#\"x\" #\"y\" #\"z\"})\n(def broken \"unterminated\n")
     (let [f0 (hash-of "f") s0 (hash-of "s") p0 (hash-of "pats")]
-      (check! "v4 header" (re-find #"^#symbol-index\tv4\t" (idx)) (subs (idx) 0 40))
+      (check! "v5 header" (re-find #"^#symbol-index\tv5\t" (idx)) (subs (idx) 0 40))
       (check! "name is not identity: (def one 1) and (def two 1) share the hash" (= (hash-of "one") (hash-of "two")) (idx))
       (check! "unparsable definition falls back to text hash with flag t (measured-not-same, not silent)"
               (and (= "t" (flags-of "broken")) (re-find #"^[0-9a-f]{10}$" (str (hash-of "broken")))) (row "broken"))
@@ -519,6 +519,54 @@
     (let [{:keys [code]} (run elsewhere {:env env} "find" "known-root-fn")]
       (check! "a registered root whose index is gone is ignored (back to the single root)" (= 0 code) ""))))
 
+(defn test-refs-dependents-closure []
+  ;; iteration 18: 8 列目の参照、find --dependents (被依存の BFS)、closure (on-demand の Merkle hash、SCC は 1 単位)
+  (let [top (mk-tmp "refs")
+        idx (fn [] (.readFileSync fs (.join path top ".kotoba-cache" "symbol-index.tsv") "utf8"))
+        refs-of (fn [sym] (let [l (re-find (js/RegExp. (str "^" sym "\\t[^\\n]*$") "m") (idx))] (nth (str/split l #"\t") 7 "")))
+        closure-of (fn [t] (second (re-find #"  #([0-9a-f]{10})  \(structural" (:out (run top "closure" t)))))]
+    (write! top "orgs/o/r/src/a/core.cljk" "(ns a.core)\n(defn base [x] (+ x 1))\n(defn uses-base [y] (base y))\n(defn rec [n] (if (pos? n) (rec (dec n)) n))\n")
+    (write! top "orgs/o/r/src/b/core.cljk" "(ns b.core (:require [a.core :as ac] [a.core :refer [base]] [clojure.string :as str]))\n(defn via-alias [z] (ac/base z))\n(defn via-refer [z] (base z))\n(defn via-full [z] (a.core/base z))\n(defn none [z] (str/join z 'base))\n")
+    (write! top "orgs/o/r/src/c.cljk" "(ns c.core)\n(defn leaf [x] x)\n(declare b)\n(defn a [x] (b (leaf x)))\n(defn b [x] (if (pos? x) (a (dec x)) x))\n(defn top [x] (a x))\n")
+    (run top "build" "--full")
+    (check! "refs: bare same-file reference" (= "base" (refs-of "uses-base")) (refs-of "uses-base"))
+    (check! "refs: alias, refer and fully-qualified all become ns/sym"
+            (= ["a.core/base" "a.core/base" "a.core/base"] [(refs-of "via-alias") (refs-of "via-refer") (refs-of "via-full")]) (idx))
+    ;; alias 経由の参照は build 時に「索引に在るか」を知れないので ns/sym のまま持つ (query 時に解決できず落ちる)。
+    ;; quote の中の symbol は data であって参照ではない
+    (check! "refs: an alias to a non-indexed ns is kept as ns/sym; a quoted symbol is data, not a reference"
+            (= "clojure.string/join" (refs-of "none")) (refs-of "none"))
+    (check! "refs: self-recursion is not a reference (the name is %name in the structural hash already)" (= "" (refs-of "rec")) (refs-of "rec"))
+    (let [{:keys [code out]} (run top "find" "base" "--dependents")]
+      (check! "--dependents lists every definition referencing base, across alias/refer/qualified, at depth 1"
+              (and (= 0 code) (re-find #"dependents of a.core/base: 4 definitions in 1 level\(s\)" out)
+                   (every? #(re-find (js/RegExp. (str "defn " % " — ")) out) ["uses-base" "via-alias" "via-refer" "via-full"])) out))
+    (let [{:keys [code out]} (run top "find" "leaf" "--dependents" "--depth" "1")]
+      (check! "--depth 1 stops at direct dependents (a only)"
+              (and (= 0 code) (re-find #"1 definitions in 1 level" out) (re-find #"defn a — " out) (not (re-find #"defn top — " out))) out))
+    (let [{:keys [code out]} (run top "find" "leaf" "--dependents" "--depth" "all")]
+      (check! "--depth all walks the transitive closure through the mutual recursion (a, b, top)"
+              (and (= 0 code) (re-find #"3 definitions in 2 level" out) (re-find #"defn top — " out) (re-find #"defn b — " out)) out))
+    (let [{:keys [code out]} (run top "find" "none" "--dependents")]
+      (check! "no dependents: exit 1 with the count 0 (not a refusal)" (and (= 1 code) (re-find #"0 definitions in 0 level" out)) out))
+    (let [{:keys [code out]} (run top "find" "nonexistent-sym" "--dependents")]
+      (check! "unknown symbol: exit 1, says nothing to depend on" (and (= 1 code) (re-find #"0 definitions named nonexistent-sym" out)) out))
+    ;; closure: 依存先の本文が変われば変わる / 無関係は変わらない / 相互再帰の仲間の依存も入る
+    (let [top0 (closure-of "c.core/top") b0 (closure-of "c.core/b") none0 (closure-of "b.core/none")]
+      (check! "closure prints a hash distinct from the structural hash's role" (re-find #"^[0-9a-f]{10}$" (str top0)) (str top0))
+      (write! top "orgs/o/r/src/c.cljk" "(ns c.core)\n(defn leaf [x] (inc x))\n(declare b)\n(defn a [x] (b (leaf x)))\n(defn b [x] (if (pos? x) (a (dec x)) x))\n(defn top [x] (a x))\n")
+      (run top "build" "--full")
+      (check! "changing a leaf dependency changes the closure of the root" (not= top0 (closure-of "c.core/top")) (str top0 " vs " (closure-of "c.core/top")))
+      (check! "… and of the mutual-recursion partner that only reaches leaf through its cycle (SCC hashed as a unit)" (not= b0 (closure-of "c.core/b")) (str b0 " vs " (closure-of "c.core/b")))
+      (check! "an unrelated definition's closure is unchanged" (= none0 (closure-of "b.core/none")) (str none0 " vs " (closure-of "b.core/none"))))
+    (let [{:keys [code out]} (run top "closure" "base")]
+      (check! "closure by bare name works when the name is in one namespace" (and (= 0 code) (re-find #"closure a.core/base" out)) out))
+    (write! top "orgs/o/r/src/d.cljk" "(ns d.core)\n(defn base [] 0)\n")
+    (run top "build" "--full")
+    (let [{:keys [code out]} (run top "closure" "base")]
+      (check! "closure by bare name in two namespaces: REFUSE and list them"
+              (and (= 2 code) (re-find #"REFUSE\tbase is defined in 2 namespaces — say which: " out)) out))))
+
 (defn test-stale-json []
   (let [top (mk-tmp "json")]
     (write! top "x.cljk" "(defn foo [] 1)\n")
@@ -545,6 +593,7 @@
   (test-content-hash)
   (test-structural-hash)
   (test-known-roots)
+  (test-refs-dependents-closure)
   (test-no-index-and-root-discovery)
   (test-stale-json))
 
