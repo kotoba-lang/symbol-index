@@ -84,7 +84,9 @@
         args  (map #(str (get-in % [:function :arguments])) calls)
         ;; CLI を実際に呼んだ回数。cache file (.tsv) を grep しただけの call は数えない
         ;; (baseline の agent が .kotoba-cache/symbol-index.tsv を直接 grep した実測)。
-        cli-re #"symbol-index(?:\.cljk)?\s+(?:build|find|show|outline|status)"]
+        ;; iteration 11 以降は subcommand 無し (`symbol-index <sym>`) が正規の呼び方。旧 regex は
+        ;; subcommand を要求していたので 09-17 の腕 D で si=0 と数えた (実際は 2 回呼んでいた)。
+        cli-re #"symbol-index(?:\.cljk)?\s+\S"]
     {:tool-calls (count calls)
      :by-tool (frequencies names)
      :symbol-index-calls (count (filter #(re-find cli-re %) args))
