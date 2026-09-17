@@ -162,16 +162,30 @@
   分けるため。JSONL の行を上書きせず <out>.regraded.jsonl に書く。"
   [condition out]
   (let [out-dir (.dirname path out)
+        ;; 走った行 (JSONL) が在れば session-id を拾い、state.db から tool 列も数え直す
+        ;; (si の計数 regex が古びていたときに再集計できるように)
+        ran (let [f (str out ".jsonl")]
+              (if (.existsSync fs f)
+                (into {} (for [l (str/split-lines (.readFileSync fs f "utf8")) :when (seq l)
+                               :let [r (js->clj (js/JSON.parse l) :keywordize-keys true)]]
+                           [(:id r) r]))
+                {}))
         rows (for [q queries
-                   :let [f (.join path out-dir (str condition "-" (:id q) "-answer.txt"))]]
+                   :let [f (.join path out-dir (str condition "-" (:id q) "-answer.txt"))
+                         r (get ran (:id q))]]
                (if (.existsSync fs f)
                  (let [g (grade (.readFileSync fs f "utf8") (:expect q))]
-                   (assoc (select-keys g [:correct :full-path :path-only :hits]) :id (:id q) :sym (:sym q) :graded-with queries-verified-on))
+                   (merge (select-keys r [:session-id :elapsed-s :total-tokens :input-tokens :output-tokens :api-calls :cost-usd])
+                          (when (:session-id r) (session-tools (:session-id r)))
+                          (select-keys g [:correct :full-path :path-only :hits])
+                          {:id (:id q) :sym (:sym q) :graded-with queries-verified-on}))
                  {:id (:id q) :sym (:sym q) :missing-answer f}))
         n (count (filter :correct rows))]
     (doseq [r rows]
       (println (str "regrade " condition " " (:id r) " " (:sym r) " → "
-                    (cond (:missing-answer r) "NO-ANSWER-FILE" (:correct r) "OK" (:path-only r) "PATH-ONLY" :else "MISS"))))
+                    (cond (:missing-answer r) "NO-ANSWER-FILE" (:correct r) "OK" (:path-only r) "PATH-ONLY" :else "MISS")
+                    (when (:session-id r) (str " tools=" (:tool-calls r) " si=" (:symbol-index-calls r) " reads=" (:file-reads r)
+                                               " calls=" (:api-calls r) " total=" (:total-tokens r) " t=" (.toFixed (or (:elapsed-s r) 0) 0) "s")))))
     (.writeFileSync fs (str out ".regraded.jsonl") (str/join "" (map #(str (js/JSON.stringify (clj->js %)) "\n") rows)))
     (println (str "REGRADED\t" n "/" (count (remove :missing-answer rows)) "\tanswers=" (count (remove :missing-answer rows)) "\ttable=" queries-verified-on))
     (.exit js/process (if (zero? (count (remove :missing-answer rows))) 2 0))))
