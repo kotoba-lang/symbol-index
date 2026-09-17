@@ -438,4 +438,31 @@
                  "索引 build 時間への影響 (bench は索引を読み直す別経路。build に組み込んだ A/B は次)"
                  "agent 側 (hermes) の call 数・token への効果"]
   :verdict :measured-not-landed
-  :next "scan-file の content-hash の隣に struct hash 列を足し (TSV v4)、find の (+N identical) と outline の変更検知を struct 側に切り替えて A/B。名前→hash の naming 面を別 file にするかはその後"}]
+  :next "scan-file の content-hash の隣に struct hash 列を足し (TSV v4)、find の (+N identical) と outline の変更検知を struct 側に切り替えて A/B。名前→hash の naming 面を別 file にするかはその後"}
+
+ ;; ---- iteration 15b (2026-09-17) — 構造 hash を索引本体に着地 (TSV v4)。Co-Scientist: 観測 → 仮説 → A/B → 着地 → 反証 ----
+ ;; 再現 (A/B): cd <superproject>; /usr/bin/time -p kbb --backend sci scripts/symbol-index.cljk build --full
+ ;;             (v3 は commit 276a6da の script、v4 はこの commit) → find exec-op / default-limit / now / rand-hex16 / as-float の 1 行目を比べる
+ {:iteration 15 :id :h36-struct-hash-landed
+  :date "2026-09-17"
+  :observation ":h35 で構造 hash は corpus 上で name/identity を分け、text hash の欠陥 (文字列内空白) を 1 件出した。索引は text hash のまま"
+  :hypothesis "7 列目を構造 hash に置き換えても find の畳み ([sym kind hash]) は壊れず、同名の写しが増えて畳まれ、outline の変更検知が rename / comment に不感になる。cost は full build の parse 分だけ (incremental は cache で不変)"
+  :design "TSV v4: 7 列目 = 構造 hash、reader を通らない定義は text hash に落として flags に t を立てる (『測れなかった』を『同じ』に混ぜない)。find / show / outline / relocate は列の意味が変わるだけでコード不変"
+  :ab {:corpus "root、51,825 file、616,218 symbol、同一 checkout で連続実行"
+       :full-build {:v3 {:real-s 105.1 :user-s 57.7 :load 18.0} :v4 {:real-s 288.6 :user-s 237.9 :load "16→35 (途中で上がった)"}
+                    :note "user CPU で 4.1 倍 (parse の分)。real は load に揺れる。full build は月に数回、agent が引く経路ではない"}
+       :incremental-build {:v4 {:real-s 44.4 :cached-files "51778/51825"} :note "cache は mtime+size で行を再利用するので parse は走らない (v3 と同じ経路)"}
+       :query-latency {:find-s 0.72 :outline-s 0.95 :note "v3 と同じ (TSV 走査、hash は読むだけ)"}
+       :text-fallback-rows {:n 280 :of 616218 :share 0.00045 :note ":h35 の line-based span では 932。索引の idx-based span では nested def の切れ目が正しいので 3 分の 1"}
+       :find-fold {:exec-op {:v3 "13 hits (1048 folded)" :v4 "11 hits (1050 folded)"}
+                   :default-limit {:v3 "26 (1075)" :v4 "25 (1076)"}
+                   :now {:v3 "5953 (4852)" :v4 "5827 (4978)"}
+                   :rand-hex16 "2 (1018) 両方" :as-float "4 (999) 両方" :reconcile "183 (72) 両方" :content-hash "22 (6) 両方"
+                   :note "find の畳みは名前が同じものの中だけなので、増分は +2 / +1 / +126。大きな写し (verify-run の clone) は text hash で既に畳まれていた —— find 側の効果は小さい。効くのは outline の変更検知 (rename / comment で『body changed』を出さない) と、名前を跨ぐ同一性 (find は使わない。次の naming 面の材料)"}}
+  :falsified-by [{:broke "set の印字 sort を消す" :red "the same regex set written in a different element order hashes the same"
+                  :note "最初の test (同じ set を 2 回 build) は sort 無しでも緑だった —— 1 file・同一順の parse では regex の identity 順が一致する。別順に書いた 2 定義で初めて落ちた"}
+                 {:broke "def 名を %name に落とさない" :red "name is not identity: (def one 1) and (def two 1) share the hash"}
+                 {:broke "fallback の flag t を立てない" :red "unparsable definition falls back to text hash with flag t"}]
+  :tests "94/0 (v3 の『詰め物 comment で別行』は v4 で 1 行に畳む期待に反転)"
+  :not-measured ["agent 側 (hermes) の call 数 / token" "参照先 hash の Merkle 化" "macro 展開後の同一性"]
+  :verdict :landed}]
