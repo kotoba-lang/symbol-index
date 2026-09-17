@@ -601,4 +601,17 @@
              :found "amu check の出力に :definitions {:entries {name {:cid bafyrei… :dependencies [cid…]}}} (kotoba.definition-identity/v1) —— compiler 側に定義 CID + 依存が既に在る"}
   :tests "symbol-index 126/0 (壊し方 2 通り赤)、plugin-hermes probe_memo.py 8/8 (壊し方 2 通り: 保存しない → B/C 赤、mtime を key に → C 赤)"
   :not-measured ["core 除外の漏れ (kotoba stdlib の名前は core に無いので bare 参照として残る = 索引に無ければ落ちるだけ)" "amu の定義 CID と索引の closure hash の一致率"]
+  :verdict :landed}
+
+ ;; ---- iteration 20b (2026-09-18) — Claude Code 腕 G2: root 写しと CLAUDE.md を揃えた状態で再走 (:closing-2026-09-18 :open 1) ----
+ {:iteration 20 :id :h43-claude-arm-g2-synced
+  :date "2026-09-18"
+  :hypothesis "腕 G の費用 (6.1 tool) は索引でなく『root 写しの drift』と『--dependents が入口文書に無い』だった。両方揃えれば q9 が通り tool call が下がる"
+  :arm-G2 {:condition "Claude Code headless、CLAUDE.md に --dependents / closure / 版ずれ規則 (29cb0e6)、root 写し = 上流 (iteration 19)" :n 10
+           :correct "10/10 (grader の窓を 200 → 1500 字に広げて再採点。q9 は正しい 7 件を table に `:168` の形で並べ、旧窓では PATH-ONLY)" :tool-calls-mean 3.1 :si-mean 1.1 :api-mean 4.1 :total-tok-mean 259634 :file-reads 9 :wall-mean-s 48 :cost-usd 6.49
+           :q9 "--dependents を最初に引いて 7 件を得たあと、rg と sed で裏取り 7 tool (prompt の『読んで確かめよ』)。hermes 腕 H も同じ形で 3 tool"
+           :q10 "closure 1 tool / 2 turn"}
+  :G->G2 {:correct ["9/10" "10/10"] :tool-calls [6.1 3.1] :api [7.1 4.1] :total-tok [438416 259634] :cost-usd [8.02 6.49] :file-reads [11 9]
+          :note "REFUSE → 上流探し の復旧 (+3〜5 tool) が消えた。残る差 (H の 1.5 に対し 3.1) は Claude が『確かめよ』に対し sed / rg で裏取りする分と、cache read 主体の token (CLAUDE.md + hook ≈ 60k/turn)"}
+  :grader-fix "basename からの窓 200 → 1500 字 (G / H の採点は不変: 9/10 → 9/10、10/10 → 10/10)"
   :verdict :landed}]

@@ -133,10 +133,12 @@
                    :let [base (.basename path p)
                          repo (nth (str/split p #"/") 2)
                          base-ok (str/includes? answer base)
-                         ;; 行番号は basename の直後 200 字で見る (別 hit の数字を拾わない)。同じ file の複数 hit
-                         ;; (q9 の kagami.cljk:587 / :507 / :446) のため、basename の出現を全部見る (iteration 19)
+                         ;; 行番号は basename の直後で見る (別 hit の数字を拾わない)。同じ file の複数 hit
+                         ;; (q9 の kagami.cljk:587 / :507 / :446) のため、basename の出現を全部見る (iteration 19)。
+                         ;; 窓は 200 → 1500 字 (iteration 20: Claude 腕 G2 q9 が basename を table の見出しに 1 回だけ書き、
+                         ;; 7 行番号を `:168` の形で 900 字に渡って並べた —— 正しい答えが PATH-ONLY と採点された)
                          line-ok (and base-ok
-                                      (boolean (some (fn [idx] (line-near? (subs answer idx (min (count answer) (+ idx 200))) line))
+                                      (boolean (some (fn [idx] (line-near? (subs answer idx (min (count answer) (+ idx 1500))) line))
                                                      (occurrences answer base))))
                          repo-ok (str/includes? answer repo)]]
                {:path p :base-ok base-ok :line-ok line-ok :repo-ok repo-ok})]

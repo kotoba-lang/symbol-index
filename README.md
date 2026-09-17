@@ -165,6 +165,7 @@ agent はこう使う: 変更の有無は `cat` でなく `outline` の hash 比
 |---|---|---|---|---|---|
 | H: hermes + iteration 18 (q1–q10、被依存 / closure 込み) | **10/10** | **1.5** | **2.5** | 46,604 | 0 |
 | G: Claude Code headless (CLAUDE.md の 1 行のみ、root 写しは v4) | 9/10 | 6.1 | 7.1 | 438,416 | 11 |
+| G2: 同、root 写しと CLAUDE.md を揃えた翌日 (09-18) | **10/10** | 3.1 | 4.1 | 259,634 | 9 |
 
 G の費用は索引ではなく 2 つの穴: ① superproject 本体の root 写し `scripts/symbol-index.cljk` が v4 のまま
 v5 索引を REFUSE し、10/10 で agent が上流を探して復旧した (+3〜5 call)。拒否文が「run build」だと古い版で
