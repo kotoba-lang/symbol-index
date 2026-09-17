@@ -148,7 +148,7 @@ root corpus の実測: **定義の 41.2% (233,858 / 567,719) は他と本文が�
 agent はこう使う: 変更の有無は `cat` でなく `outline` の hash 比較 (file の 1/5.7)。`find` の
 `(+N identical)` の写しは読まない。stale file の `re-located … body unchanged` なら読み直さない。
 
-### iteration 15 (2026-09-17) — 構造 hash (測定のみ、未着地)
+### iteration 15 (2026-09-17) — 構造 hash (TSV v4 として着地)
 
 v3 の text hash は「写しの検出」には効くが「名前だけ違う同じ定義」は畳めず、rename / comment で
 変わる。`bench/structural_hash.cljk` で reader を通した構造 hash (def 名 → `%name`、局所束縛 →
@@ -163,8 +163,15 @@ sha256) を text hash の隣で全件計算した (599,439 定義、4 min):
 - **text hash の欠陥が 1 つ見つかった**: 文字列リテラル内の改行+空白を畳んで「同じ」と答える
   (構造 hash は正しく「違う」)
 
+着地 (TSV **v4**): 7 列目が構造 hash になった。reader を通らない定義 (root corpus で 280 / 616,218)
+は text hash に落として flags に `t` を立てる —— 「測れなかった」を「同じ」に混ぜない。A/B (同一
+checkout): full build の user CPU は 58 s → 238 s (parse の分。incremental は cache で 44 s、query は
+0.7–0.95 s で不変)。`find` の畳みは名前が同じものの中だけなので増分は小さい (exec-op +2、now +126)。
+効くのは `outline` / `show` の変更検知: rename・comment・docstring で「body changed」を出さない。
+壊し方 3 通り (set の sort / `%name` / flag `t`) で名指しの test が赤、無改変で 94/0。
+
 未測定: 参照先 hash への置換 (Merkle。依存が変わっても自分は変わらない)、macro 展開後の同一性、
-build 時間、agent 側の効果。数値と再現手順は `measurements.edn` の `:h35-structural-hash`。
+agent 側の効果。数値と再現手順は `measurements.edn` の `:h35-structural-hash` / `:h36-struct-hash-landed`。
 
 ### iteration 13 (2026-09-15) — 固定点
 
@@ -193,7 +200,7 @@ bin/symbol-index outline kagami.db
 bin/symbol-index status
 ```
 
-`build` は `.kotoba-cache/symbol-index.tsv` (v2、gitignore 推奨) に落とす。
+`build` は `.kotoba-cache/symbol-index.tsv` (v4、gitignore 推奨) に落とす。
 `find` / `show` / `outline` は**索引が無ければ REFUSE する** (exit 2、自動 build
 しない —— iteration 3 で Hermes Agent に導入したとき、agent の terminal が `$HOME`
 に居る状態で呼ばれ、home 全体を build しに行って tool の 120s timeout に当たった

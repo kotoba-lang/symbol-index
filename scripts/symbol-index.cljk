@@ -21,7 +21,7 @@
 ;;   kbb --backend sci scripts/symbol-index.cljk outline kagami.db  # file/ns の定義一覧
 ;;   kbb --backend sci scripts/symbol-index.cljk status         # 索引の素性
 ;;
-;; 索引は .kotoba-cache/symbol-index.tsv (v2) に落ちる。iteration 2 (2026-09-15)
+;; 索引は .kotoba-cache/symbol-index.tsv (v4: 7 列目が構造 hash) に落ちる。iteration 2 (2026-09-15)
 ;; で JSON + js->clj (108 MB, 5.5 s/query) を捨て、TSV を native RegExp で
 ;; 走査する形にした (measurements.edn に実測)。
 ;;
@@ -29,14 +29,16 @@
 ;; (無引数・未知 cmd・索引が空・索引の top が cwd と違う・show の不在 symbol)。
 ;; 「測れなかった」と「測って無かった」を同じ値にしない。
 
-(require '[clojure.string :as str])
+(require '[clojure.string :as str]
+         '[clojure.walk :as walk]
+         '[edamame.core :as e])
 
 (def fs (js/require "node:fs"))
 (def path (js/require "node:path"))
 
 (def index-dir ".kotoba-cache")
 (def index-file "symbol-index.tsv")
-(def index-version "v3")   ; v3: 7 列目に定義の content hash (iteration 14)
+(def index-version "v4")   ; v4: 7 列目が構造 hash (iteration 15)、読めない定義は text hash + flag t
 
 (defn- nearest-indexed-ancestor
   "cwd から上へ辿って .kotoba-cache/symbol-index.tsv を持つ最初の dir。無ければ nil。
@@ -296,11 +298,121 @@
 
 (def ^:private crypto (js/require "node:crypto"))
 
+(defn- sha10 [s]
+  (subs (.digest (.update (.createHash crypto "sha256") s "utf8") "hex") 0 10))
+
 (defn- content-hash
-  "定義本文の content hash: 空白の連なりを 1 つに畳み、前後を trim して sha256、先頭 10 hex。"
+  "定義本文の text hash (v3): 空白の連なりを 1 つに畳み、前後を trim して sha256、先頭 10 hex。
+  v4 では reader を通せない定義の fallback (flag t)。文字列リテラル内の空白差を『同じ』と
+  答える欠陥がある (iteration 15 で実測) ので、読める定義には使わない。"
   [span]
-  (let [norm (str/trim (str/replace span #"\s+" " "))]
-    (subs (.digest (.update (.createHash crypto "sha256") norm "utf8") "hex") 0 10)))
+  (sha10 (str/trim (str/replace span #"\s+" " "))))
+
+;; ---------------------------------------------------------------- 構造 hash (iteration 15)
+;; 名前でなく本文で同一、の「本文」を text でなく form にする。def 名を %name、束縛位置に現れた
+;; symbol を出現順に %0 %1 …、docstring と位置 meta を落とし、set / map は要素の印字を sort、
+;; `*print-meta*` で pr-str して sha256。syntactic-structural であって semantic ではない
+;; (macro 展開前、参照先の hash は入れない —— Merkle 化は未着地)。scope は見ないので
+;; shadowing は畳む。root corpus の実測 (measurements.edn :h35): 他と同一の定義 39.0% → 45.8%、
+;; rename / comment に不感、末尾に nil を足せば変わる。
+
+(def ^:private parse-opts
+  (e/normalize-opts {:all true :read-cond :preserve :auto-resolve name
+                     :readers (fn [t] (fn [v] (list 'TAG t v)))
+                     :syntax-quote true :location? (constantly false)}))
+
+(def ^:private binding-heads
+  '#{fn fn* defn defn- defmacro let let* loop loop* for doseq dotimes when-let if-let
+     when-some if-some letfn binding with-open with-redefs as-> defmethod deftest
+     defrecord deftype catch})
+
+(defn- binding-syms
+  "vector (束縛位置) の中の symbol を出現順に。destructuring の中も拾う。"
+  [v]
+  (let [acc (volatile! [])]
+    (walk/prewalk (fn [x]
+                    (when (and (symbol? x) (not (str/includes? (name x) "/")) (not= x '&))
+                      (vswap! acc conj x))
+                    x)
+                  v)
+    @acc))
+
+(defn- collect-locals
+  "定義全体から「束縛位置に現れた symbol」を出現順に集める (scope は見ない)。"
+  [form]
+  (let [acc (volatile! []) seen (volatile! #{})
+        push! (fn [s] (when-not (@seen s) (vswap! seen conj s) (vswap! acc conj s)))
+        arity! (fn [ys] (doseq [y ys]
+                          (cond (vector? y) (run! push! (binding-syms y))
+                                (and (seq? y) (vector? (first y))) (run! push! (binding-syms (first y))))))]
+    (walk/prewalk
+     (fn [x]
+       (when (and (seq? x) (symbol? (first x)) (binding-heads (first x)))
+         (let [[h & r] x]
+           (cond
+             (#{'defn 'defn- 'defmacro 'defmethod 'deftest} h) (arity! (rest r))
+             (#{'fn 'fn*} h) (arity! r)
+             (#{'let 'let* 'loop 'loop* 'for 'doseq 'dotimes 'when-let 'if-let 'when-some 'if-some 'binding 'with-open 'with-redefs} h)
+             (when (vector? (first r)) (run! push! (mapcat binding-syms (take-nth 2 (first r)))))
+             (#{'as-> 'catch} h) (when (symbol? (second r)) (push! (second r)))
+             (= 'letfn h) (when (vector? (first r))
+                            (doseq [f (first r)] (when (and (seq? f) (symbol? (first f))) (push! (first f)))))
+             (#{'defrecord 'deftype} h) (when (vector? (second r)) (run! push! (binding-syms (second r))))
+             :else nil)))
+       x)
+     form)
+    @acc))
+
+(defn- strip-loc-meta [x]
+  (if (and (some? x) (satisfies? IMeta x) (meta x))
+    (let [m (dissoc (meta x) :row :col :end-row :end-col :source)]
+      (with-meta x (when (seq m) m)))
+    x))
+
+(defn- def-form? [form]
+  (and (seq? form) (symbol? (first form)) (str/starts-with? (name (first form)) "def")))
+
+(defn- strip-doc
+  "(defX name \"doc\" …) → (defX name …)。"
+  [form]
+  (if (and (def-form? form) (>= (count form) 4) (string? (nth form 2)))
+    (with-meta (concat (take 2 form) (drop 3 form)) (meta form))
+    form))
+
+(defn- structural-hash
+  "span の第 1 form の構造 hash。reader を通らなければ nil (呼び側が text hash に落とす)。"
+  [span]
+  (try
+    (let [form (e/parse-next (e/reader span) parse-opts)]
+      (when-not (= ::e/eof form)
+        (let [form (strip-doc form)
+              defname (when (def-form? form) (second form))
+              ren (into {} (map-indexed (fn [i s] [s (symbol (str "%" i))]) (collect-locals form)))
+              ren (if (symbol? defname) (assoc ren defname '%name) ren)]
+          (sha10
+           (binding [*print-meta* true]
+             (pr-str
+              (walk/postwalk
+               (fn [x]
+                 (let [x (strip-loc-meta x)]
+                   (cond
+                     (symbol? x)
+                     (let [x' (get ren x x)]
+                       ;; syntax-quote の gensym a__12__auto__ は番号が不安定
+                       (if (str/ends-with? (name x') "__auto__")
+                         (symbol (str/replace (name x') #"__\d+__auto__$" "__auto__"))
+                         (with-meta x' (meta x))))
+                     ;; regex は値等価を持たず、9 要素以上の map は hash 順 → 印字を sort
+                     (set? x) (with-meta (list 'SET* (vec (sort (map pr-str x)))) (meta x))
+                     (map? x) (with-meta (list 'MAP* (vec (sort (map (fn [[k v]] (pr-str [k v])) x)))) (meta x))
+                     :else x)))
+               form)))))))
+    (catch :default _ nil)))
+
+(defn- definition-hash
+  "v4 の 7 列目: 構造 hash、読めなければ text hash。第 2 値は flag (\"t\" = text fallback)。"
+  [span]
+  (if-let [h (structural-hash span)] [h ""] [(content-hash span) "t"]))
 
 (defn- scan-file
   "1 file から TSV 行 (sym<TAB>kind<TAB>file<TAB>line<TAB>ns<TAB>flags<TAB>hash) の列を返す。
@@ -324,16 +436,16 @@
           (when (= kind "ns") (vreset! ns* sym))
           (vswap! heads conj {:sym sym :kind kind :line line :ns (if (= kind "ns") sym @ns*) :nested nested :idx idx})
           (recur line idx))))
-    ;; iteration 14: 定義の span = この def の先頭から次の top-level def の直前まで (sexp parser
-    ;; を持ち込まない)。空白を正規化して sha256 の先頭 10 hex を content hash にする。
-    ;; 名前に依らない Unison 型の同一性: 写しは同じ hash、空白だけの変更は同じ hash、
-    ;; 本文の変更は違う hash。span なので def 間の comment も含む (それも「その定義の文脈」)。
+    ;; iteration 14: 定義の span = この def の先頭から次の top-level def の直前まで。
+    ;; iteration 15: span の第 1 form を reader に通した構造 hash (definition-hash)。読めなければ
+    ;; text hash に落として flag t を立てる (「測れなかった」を「同じ」に混ぜない)。
     (let [hs @heads n (count hs)]
       (vec (map-indexed
             (fn [i {:keys [sym kind line ns nested idx]}]
               (let [end (if (< (inc i) n) (:idx (nth hs (inc i))) (count text))
-                    span (subs text idx end)]
-                (str sym "\t" kind "\t" rel "\t" line "\t" ns "\t" (if nested "n" "") "\t" (content-hash span))))
+                    span (subs text idx end)
+                    [h tflag] (definition-hash span)]
+                (str sym "\t" kind "\t" rel "\t" line "\t" ns "\t" (str (if nested "n" "") tflag) "\t" h)))
             hs)))))
 
 (defn- build-index
@@ -414,7 +526,7 @@
 (defn- parse-row [line]
   (let [[sym kind file ln ns flags hash] (str/split line #"\t")]
     {:sym sym :kind kind :file file :line (js/parseInt ln 10) :ns (or ns "")
-     :nested (= flags "n") :hash (or hash "")}))
+     :nested (str/includes? (or flags "") "n") :text-fallback (str/includes? (or flags "") "t") :hash (or hash "")}))
 
 (defn- refuse
   "拒否は理由を印字して 2 を返す。理由の literal は test が pin する。"

@@ -248,9 +248,10 @@
             (and (= 0 code) (re-find #"too many to list: 0 exact, 45 substring" out)
                  (= 8 (count (re-seq #"(?m)^  defn wide-" out)))) out))
   (let [{:keys [code out]} (run top "find" "pad")]
-    ;; edge.cljk の最後の (def pad 1) だけ span に末尾の ; 詰め物を含むので hash が違う → 2 行
-    (check! "identical (def pad 1) fold into one row by content hash; the one with a different span stays apart"
-            (and (= 0 code) (re-find #"2 hits for pad \(\d+ identical folded\)" out)
+    ;; edge.cljk の最後の (def pad 1) は span に末尾の ; 詰め物を含む。v3 (text hash) では別行だったが、
+    ;; v4 (構造 hash) では comment は identity に入らないので 1 行に畳む (iteration 15)
+    (check! "identical (def pad 1) fold into one row by structural hash, even the one whose span carries trailing comments"
+            (and (= 0 code) (re-find #"1 hits for pad \(\d+ identical folded\)" out)
                  (re-find #"(?m)^  def pad — edge.cljk:1  #[0-9a-f]{10}  \(\+\d+ identical\)$" out)) out))
   (let [{:keys [code out]} (run top "find" "hidden-fx")]
     (check! "0 hits: near suggestions by fragment (false negative guard)"
@@ -437,6 +438,42 @@
           (check! "stale file, changed body: note says body changed with the new hash"
                   (and (re-find #"was line 4; body changed → #[0-9a-f]{10}" out) (not (re-find (js/RegExp. (str "#" (hash-of "g") "\\)")) out))) out))))))
 
+(defn test-structural-hash []
+  ;; iteration 15: 7 列目は構造 hash。両方向を pin する (同じであるべき 4 通り / 違うべき 3 通り) と
+  ;; fallback (読めない定義は text hash + flag t)。
+  (let [top (mk-tmp "shash")
+        idx (fn [] (.readFileSync fs (.join path top ".kotoba-cache" "symbol-index.tsv") "utf8"))
+        row (fn [sym] (re-find (js/RegExp. (str "^" sym "\\t[^\\n]*$") "m") (idx)))
+        hash-of (fn [sym] (second (re-find (js/RegExp. (str "^" sym "\\t[^\\n]*\\t([0-9a-f]{10})$") "m") (idx))))
+        flags-of (fn [sym] (nth (str/split (row sym) #"\t") 5))
+        build! (fn [src] (write! top "a.cljk" src) (run top "build" "--full"))]
+    (build! "(ns a)\n(defn f [x] (+ x 1))\n(def one 1)\n(def two 1)\n(def s \"one two\")\n(def pats #{#\"x\" #\"y\" #\"z\"})\n(def broken \"unterminated\n")
+    (let [f0 (hash-of "f") s0 (hash-of "s") p0 (hash-of "pats")]
+      (check! "v4 header" (re-find #"^#symbol-index\tv4\t" (idx)) (subs (idx) 0 40))
+      (check! "name is not identity: (def one 1) and (def two 1) share the hash" (= (hash-of "one") (hash-of "two")) (idx))
+      (check! "unparsable definition falls back to text hash with flag t (measured-not-same, not silent)"
+              (and (= "t" (flags-of "broken")) (re-find #"^[0-9a-f]{10}$" (str (hash-of "broken")))) (row "broken"))
+      (check! "parsable definitions carry no t flag" (= "" (flags-of "f")) (row "f"))
+      ;; 同じであるべき: 局所束縛の rename / comment / docstring / 空白
+      (build! "(ns a)\n(defn f [y] (+ y 1))\n(def one 1)\n(def two 1)\n(def s \"one two\")\n(def pats #{#\"x\" #\"y\" #\"z\"})\n(def broken \"unterminated\n")
+      (check! "renaming a local binding keeps the hash" (= f0 (hash-of "f")) (str f0 " vs " (hash-of "f")))
+      (build! "(ns a)\n;; c\n(defn f\n  \"doc\"\n  [x] ; c2\n  (+ x 1))\n(def one 1)\n(def two 1)\n(def s \"one two\")\n(def pats #{#\"x\" #\"y\" #\"z\"})\n(def broken \"unterminated\n")
+      (check! "comments, docstring and whitespace keep the hash" (= f0 (hash-of "f")) (str f0 " vs " (hash-of "f")))
+      (check! "a set of regex literals hashes the same across builds (element order is not identity)"
+              (= p0 (hash-of "pats")) (str p0 " vs " (hash-of "pats")))
+      ;; regex は値等価を持たないので、sort しなければ書いた順 (= identity 順) が hash に漏れる
+      (write! top "b.cljk" "(ns b)\n(def p1 #{#\"x\" #\"y\" #\"z\"})\n(def p2 #{#\"z\" #\"y\" #\"x\"})\n")
+      (run top "build" "--full")
+      (check! "the same regex set written in a different element order hashes the same (sorted canonical form)"
+              (= (hash-of "p1") (hash-of "p2")) (str (hash-of "p1") " vs " (hash-of "p2")))
+      ;; 違うべき: 本文 / 文字列リテラル内の空白 (v3 の text hash が『同じ』と答えていた欠陥) / 束縛の入れ替え
+      (build! "(ns a)\n(defn f [x] (+ x 1) nil)\n(def one 1)\n(def two 1)\n(def s \"one  two\")\n(def pats #{#\"x\" #\"y\"})\n(def broken \"unterminated\n")
+      (check! "adding a form to the body changes the hash" (not= f0 (hash-of "f")) (str f0 " vs " (hash-of "f")))
+      (check! "whitespace inside a string literal changes the hash (v3 text hash said same)" (not= s0 (hash-of "s")) (str s0 " vs " (hash-of "s")))
+      (check! "removing a set element changes the hash" (not= p0 (hash-of "pats")) (str p0 " vs " (hash-of "pats")))
+      (build! "(ns a)\n(defn f [x] (+ 1 x))\n(def one 1)\n(def two 1)\n(def s \"one two\")\n(def pats #{#\"x\" #\"y\" #\"z\"})\n(def broken \"unterminated\n")
+      (check! "swapping argument order in the body changes the hash" (not= f0 (hash-of "f")) (str f0 " vs " (hash-of "f"))))))
+
 (defn test-stale-json []
   (let [top (mk-tmp "json")]
     (write! top "x.cljk" "(defn foo [] 1)\n")
@@ -461,6 +498,7 @@
   (test-top-is-worktree)
   (test-incremental)
   (test-content-hash)
+  (test-structural-hash)
   (test-no-index-and-root-discovery)
   (test-stale-json))
 
