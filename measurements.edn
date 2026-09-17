@@ -506,4 +506,30 @@
   :summary-D-E-F {:correct ["7/8" "7/8" "8/8"] :timeouts [1 1 0] :tool-calls-mean [3.1 1.8 1.5] :api-mean [4.0 2.5 2.5] :total-tok-mean [72798 46269 46060] :file-reads [0 0 0]
                   :vs-C-2026-09-15 "C は 8/8・tool 2.0・api 3.0・total 50,740 (file read 8/8 で 1 回)。F は tool 1.5・api 2.5・46,060・file read 0 —— iteration 7 の snippet (H24) が agent 側で効いた。壁時計は日を跨いで比べない (API 1 call 9 s → 120 s)"}
   :not-measured ["hermes 以外の agent (Claude Code の Bash 経由)" "8 query 以外の task 形 (編集・複数 file の理解)" "登録簿 fallback を hermes が実際に踏む回数 (F では skill の規則 0 で cd したので fallback は 0 回。fallback は規則を忘れた agent の保険)"]
-  :verdict :landed}]
+  :verdict :landed}
+
+ ;; ---- iteration 17 (2026-09-17) — closure hash (Merkle: 参照先の hash を identity に入れる)。測定のみ ----
+ ;; 再現: cd <superproject>; NODE_OPTIONS=--max-old-space-size=12288 kbb --backend sci orgs/kotoba-lang/symbol-index/bench/closure_hash.cljk --all --trials 30 --out <edn>
+ ;;       (v4 索引が要る。--all で 20 min。--sample 150 なら 5 s)
+ {:iteration 17 :id :h39-closure-hash
+  :date "2026-09-17"
+  :observation ":h35 の構造 hash は参照先の本文が変わっても変わらない (『未実装であって不要ではない』)。提案 3 (compile / test 結果を定義 closure の CID で memo) はここが無いと成り立たない"
+  :hypothesis "参照 symbol を参照先の hash に置換した closure hash は、(1) 依存先の本文変更で依存元 (推移的) が全部変わり、(2) 無関係な定義は変わらず、(3) 到達距離は corpus 上で小さい"
+  :method "bench/closure_hash.cljk: file 全体を edamame で読み、ns の :require (:as / :refer) を持ち替えながら def form ごとに構造 hash + 参照 symbol 集合。解決は 同 ns → alias → refer → 完全修飾 (同 repo 優先、無ければ他 repo の最短 path)。Tarjan SCC を逆位相順に処理し、循環は SCC 全体を 1 単位で hash (member = scc-hash + 位置)。伝播 test: 被依存を持つ定義の struct hash を差し替え、closure が変わる集合 == {自分} ∪ 推移的被依存 を 30 回"
+  :measured {:corpus {:files 45542 :defs 546482 :file-parse-failed 44 :wall-s 1181
+                      :struct-hash-agrees-with-index "543747/546482 (bench の写しの構造 hash が索引 v4 の 7 列目と一致。差は file 全体 parse と span parse の reader conditional の扱い)"}
+             :refs {:total 4394319 :same-ns 575821 :alias 289030 :cross-repo 119975 :qualified 1265 :refer 1020 :unresolved 3407208 :resolved-share 0.225
+                    :note "unresolved は clojure.core / JS interop / 索引に無い lib。名前として構造 hash の中に残る。core の版が変わっても hash は変わらない (これは設計: core は identity の外)"}
+             :graph {:out-degree {:median 1 :p90 4 :max 466} :in-degree {:median 1 :p90 4 :max 6679}
+                     :blast-radius {:median 1 :p90 22 :max 60957 :zero-share 0.39 :note "sample 2000 定義の推移的被依存。max は最下層の helper (1 定義の変更で 6 万定義の closure が変わる = memo が全部無効になる。これは正しい)"}
+                     :scc {:count 362 :max 43 :self-recursive 16123 :note "declare による相互再帰。SCC 単位で hash しないと伝播が止まる"}}
+             :propagation {:trials 30 :ok 30 :changed-per-trial {:median 13 :p90 18 :max 31} :note "両方向: 推移的被依存は全部変わり、それ以外は 1 つも変わらない"}
+             :dup-share {:struct 0.485 :closure 0.395 :struct-same-closure-differs 49254
+                         :note "本文は同じだが依存先の本文が違う写しが 49,254。text / struct hash では『同じ』に見えていた。verify-run の clone が本体と別 version の helper を持つ形"}}
+  :first-full-run-failed {:what "伝播 test 20 回中 5 回『dependent unchanged』、全部 declare の相互再帰" :cause "SCC の member を個別に hash し、仲間への参照を @位置 に置き換えていたので、仲間の外部依存が変わっても自分が変わらなかった" :fix "SCC 全体の入力を連結した scc-hash に位置を足す (Unison と同じ)"
+                          :also "600k 定義の正規化 form を保持して heap を割った (OOM) → 参照 symbol 集合だけ残す + NODE_OPTIONS で 12 GB"}
+  :falsified-by [{:broke "参照先の hash を入力に入れない" :red "propagation ok 0/N (changed = 1 のみ)"}
+                 {:broke "SCC を 1 単位にしない (member ごと)" :red "dependent unchanged: c.core/b (相互再帰 fixture)"}]
+  :not-measured ["macro 展開後の参照 (展開前の symbol で解決している)" "closure hash を索引の列に足したときの build cost (bench は 20 min: 索引 build の 4 倍。SCC と閉包を incremental に更新する設計が要る)" "memo key として使ったときの hit 率 (compile 結果の cache は未実装)"]
+  :verdict :measured-not-landed
+  :next "索引に closure 列を足すかは build cost 次第。先に『変更した定義の推移的被依存を列挙する』query (find --dependents) を索引の参照グラフから出す方が agent には直接効く (どこを見直せばよいか、を 1 call で)"}]

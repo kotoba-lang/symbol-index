@@ -148,6 +148,17 @@ root corpus の実測: **定義の 41.2% (233,858 / 567,719) は他と本文が�
 agent はこう使う: 変更の有無は `cat` でなく `outline` の hash 比較 (file の 1/5.7)。`find` の
 `(+N identical)` の写しは読まない。stale file の `re-located … body unchanged` なら読み直さない。
 
+### iteration 17 (2026-09-17) — closure hash (Merkle、測定のみ)
+
+構造 hash は参照先が変わっても変わらない。`bench/closure_hash.cljk` で参照 symbol を参照先の hash に
+置換した closure hash を全件 (546,482 定義) 計算した。参照の解決率 22.5% (残りは core / interop /
+索引外の lib で、名前のまま identity に入る)。相互再帰 (declare、362 SCC、最大 43) は SCC 単位で hash
+しないと伝播が止まる —— 最初の全件で 5/20 が落ちて分かった。直したあと 30/30 両方向 (推移的被依存は
+全部変わり、他は 1 つも変わらない)。blast radius は中央値 1・p90 22・最大 60,957 (最下層の helper)。
+**本文は同じだが依存先が違う写しが 49,254** —— text / struct hash では見えなかった差。
+索引には入れていない (bench で 20 min = build の 4 倍。incremental な SCC 更新が要る)。数値と再現手順は
+`measurements.edn` の `:h39-closure-hash`。
+
 ### iteration 16 (2026-09-17) — agent 側の実測 (Hermes 腕 D / E / F) と、そこで見えた 2 つの穴
 
 iteration 7〜15 の効果を初めて agent 側で測った (`bench/hermes_ab.cljk`、8 query、同日 3 腕):
