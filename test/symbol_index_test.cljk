@@ -567,6 +567,22 @@
       (check! "closure by bare name in two namespaces: REFUSE and list them"
               (and (= 2 code) (re-find #"REFUSE\tbase is defined in 2 namespaces — say which: " out)) out))))
 
+(defn test-version-skew []
+  ;; iteration 19: 索引が script より新しいときは build を勧めない (古い写しで新しい索引を潰さない)
+  (let [top (mk-tmp "skew")]
+    (write! top "x.cljk" "(defn foo [] 1)\n")
+    (run top "build")
+    (let [f (.join path top ".kotoba-cache" "symbol-index.tsv")
+          t (.readFileSync fs f "utf8")]
+      (.writeFileSync fs f (str/replace-first t #"^#symbol-index\tv\d+" "#symbol-index\tv99"))
+      (let [{:keys [code out]} (run top "find" "foo")]
+        (check! "index newer than the script: REFUSE says use the newer script, never build"
+                (and (= 2 code) (re-find #"REFUSE\tindex is v99 but this script copy is v\d+ \(older\) — use the newer script .*do NOT build with this copy" out)) out))
+      (.writeFileSync fs f (str/replace-first t #"^#symbol-index\tv\d+" "#symbol-index\tv1"))
+      (let [{:keys [code out]} (run top "find" "foo")]
+        (check! "index older than the script: REFUSE says run build"
+                (and (= 2 code) (re-find #"REFUSE\tindex is v1, this script needs v\d+ — run build" out)) out)))))
+
 (defn test-stale-json []
   (let [top (mk-tmp "json")]
     (write! top "x.cljk" "(defn foo [] 1)\n")
@@ -594,6 +610,7 @@
   (test-structural-hash)
   (test-known-roots)
   (test-refs-dependents-closure)
+  (test-version-skew)
   (test-no-index-and-root-discovery)
   (test-stale-json))
 
