@@ -148,6 +148,24 @@ root corpus の実測: **定義の 41.2% (233,858 / 567,719) は他と本文が�
 agent はこう使う: 変更の有無は `cat` でなく `outline` の hash 比較 (file の 1/5.7)。`find` の
 `(+N identical)` の写しは読まない。stale file の `re-located … body unchanged` なら読み直さない。
 
+### iteration 15 (2026-09-17) — 構造 hash (測定のみ、未着地)
+
+v3 の text hash は「写しの検出」には効くが「名前だけ違う同じ定義」は畳めず、rename / comment で
+変わる。`bench/structural_hash.cljk` で reader を通した構造 hash (def 名 → `%name`、局所束縛 →
+`%0 %1 …`、docstring と位置 meta を落とし、set / map は印字 sort、`*print-meta*` で pr-str →
+sha256) を text hash の隣で全件計算した (599,439 定義、4 min):
+
+- 他と同一の定義: text **39.0%** → 構造 **45.8%** (+41,135。自明な `(def x 32)` を除くと +17,409)
+- 1 つの構造 hash に 2 つ以上の名前: 10,000 group 超 (最大 73 名)。`(defn disposition-commit [d]
+  (eq-flag d 2))` と `(defn reason-phase-approval [r] (eq-flag r 2))` は同じ hash に 23 名 ——
+  naming 面と identity 面を分ける根拠
+- 両方向: ws / comment / rename は構造 hash 同、末尾に `nil` を足すと異 (各 ~100 定義、全部期待どおり)
+- **text hash の欠陥が 1 つ見つかった**: 文字列リテラル内の改行+空白を畳んで「同じ」と答える
+  (構造 hash は正しく「違う」)
+
+未測定: 参照先 hash への置換 (Merkle。依存が変わっても自分は変わらない)、macro 展開後の同一性、
+build 時間、agent 側の効果。数値と再現手順は `measurements.edn` の `:h35-structural-hash`。
+
 ### iteration 13 (2026-09-15) — 固定点
 
 この機で測れる指標は固定: test 76/0、`one_call` 8/8 · 8/8 (chars 平均 1,147)、root 索引
