@@ -17,7 +17,7 @@ symbol-index <file.cljk>      # outline: file の定義一覧 (行番号 + signa
 symbol-index <ns.name>        # outline: ns の定義一覧
 symbol-index find <t> --in <path> | --exact   # 多いときの絞り込み
 symbol-index find <sym> --dependents [--depth N|all]   # X を変えたら見直すべき定義 (被依存) を深さ別に (1 call)
-symbol-index closure <ns/sym>  # Merkle closure hash (依存先の本文まで含む identity)。compile / test 結果の memo key
+symbol-index closure <ns/sym> | <file>  # Merkle closure hash (依存先の本文まで含む identity)。file なら全定義を畳んだ 1 つの hash = compile / test 結果の memo key
 symbol-index status           # 索引の素性 (top / built-at / symbols / pruned)
 symbol-index build            # 索引生成 (incremental。--full で全読み)
 ```

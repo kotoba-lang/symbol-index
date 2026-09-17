@@ -588,4 +588,17 @@
          {:what "kotoba-lang / app-kotoba-cloud の west pin" :how "docs のみの変更なので進めていない。進めるなら scripts/west-pin-put.cljk kotoba-lang 37d504b / app-kotoba-cloud dcfa45e2"}
          {:what "app-kotoba-cloud の deploy 前提 2 つ (contracts/out の ABI = forge build、amu が PATH に無い)" :how "README の deploy 手順に前提として書くか、npm run deploy の先頭で検出して名指しで拒否する。今朝の mktg tick も amu 127 で止まっていた"}]
   :preserved-owner-wip ["superproject 本体 checkout: dirty 99 file (他 session の tick)" "orgs/kotoba-lang/kotoba-lang: dirty 123 file (hook が『触るな』)" "orgs/kotoba-lang/app-kotoba-cloud: HEAD 094f7693 dirty 18 (他 session が進めた)" "kotoba-lang の open PR 6 件 (#675–#698、他 agent)" "superproject の worktree 10 本 (bot fleet)"]
-  :resume "cd <superproject>; kbb --backend sci orgs/kotoba-lang/symbol-index/test/symbol_index_test.cljk → 118/0 を確認 → symbol-index kagami.db/apply-pin-advance --dependents が 7 件出ることを確認 → 上の :open の 1 つ目から"}]
+  :resume "cd <superproject>; kbb --backend sci orgs/kotoba-lang/symbol-index/test/symbol_index_test.cljk → 118/0 を確認 → symbol-index kagami.db/apply-pin-advance --dependents が 7 件出ることを確認 → 上の :open の 1 つ目から"}
+
+ ;; ---- iteration 20 (2026-09-18) — 残 gap の解消: 同 ns 別 file の参照 / closure <file> / kotoba_check memo ----
+ {:iteration 20 :id :h42-cross-file-refs-file-closure-memo
+  :date "2026-09-18"
+  :observation ":h40 の known-gap『同 ns の別 file への bare 参照が落ちる』と :closing-2026-09-18 :open の 2・3"
+  :design ["bare 参照 = core でも局所でもない unqualified symbol (core は sci の (ns-publics 'clojure.core) 674 個 + special form + JS 型名)。build の 2 pass は要らなかった" "closure <file>: file の全定義を root に closure-map (symbol mode と共通化) → sort → sha10" "plugin-hermes kotoba_check: key = file closure + amu の path:mtime:size。served は memo.hit=true を必ず言う、keyed できなければ not_keyed に理由"]
+  :measured {:full-build {:v5-user-s 245.4 :v5b-user-s 253.7 :real-s 300} :index-bytes {:before 109464263 :after 113316718} :rows-with-refs {:before 384556 :after 481347} :refs-total {:before 1422606 :after 1922441}
+             :query {:dependents-s 2.80 :closure-file-s 1.41 :example "kagami/db.cljk: 17 定義、到達 19、unresolved 11"}
+             :memo {:miss-s 26.7 :hit-s 0.39 :note "probe_memo.py。miss は plugin 経由の amu check (直接は 2.2 s だった。差は amu の初回起動 / cache と思われる、未分解)"}
+             :found "amu check の出力に :definitions {:entries {name {:cid bafyrei… :dependencies [cid…]}}} (kotoba.definition-identity/v1) —— compiler 側に定義 CID + 依存が既に在る"}
+  :tests "symbol-index 126/0 (壊し方 2 通り赤)、plugin-hermes probe_memo.py 8/8 (壊し方 2 通り: 保存しない → B/C 赤、mtime を key に → C 赤)"
+  :not-measured ["core 除外の漏れ (kotoba stdlib の名前は core に無いので bare 参照として残る = 索引に無ければ落ちるだけ)" "amu の定義 CID と索引の closure hash の一致率"]
+  :verdict :landed}]

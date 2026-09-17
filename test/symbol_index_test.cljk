@@ -567,6 +567,39 @@
       (check! "closure by bare name in two namespaces: REFUSE and list them"
               (and (= 2 code) (re-find #"REFUSE\tbase is defined in 2 namespaces — say which: " out)) out))))
 
+(defn test-cross-file-refs-and-file-closure []
+  ;; iteration 20: 同 ns の別 file にある定義への bare 参照 (core は除く) と、file 単位の closure hash (memo key)
+  (let [top (mk-tmp "xfile")
+        idx (fn [] (.readFileSync fs (.join path top ".kotoba-cache" "symbol-index.tsv") "utf8"))
+        refs-of (fn [sym] (let [l (re-find (js/RegExp. (str "^" sym "\\t[^\\n]*$") "m") (idx))] (nth (str/split l #"\t") 7 "")))
+        file-hash (fn [f] (second (re-find #"closure-file [^ ]+  #([0-9a-f]{10})" (:out (run top "closure" f)))))]
+    (write! top "orgs/o/r/src/a/core.cljk" "(ns a.core)\n(defn base [x] (+ x 1))\n")
+    (write! top "orgs/o/r/src/a/more.cljk" "(ns a.core)\n(defn other-file-user [y] (base (map inc y)))\n")
+    (write! top "orgs/o/r/src/c.cljk" "(ns c.core)\n(defn leaf [x] x)\n(defn top [x] (leaf x))\n")
+    (run top "build" "--full")
+    (check! "a non-core unqualified symbol is kept as a bare reference; core names (map, inc) are not"
+            (= "base" (refs-of "other-file-user")) (refs-of "other-file-user"))
+    (let [{:keys [code out]} (run top "find" "base" "--dependents")]
+      (check! "--dependents reaches a same-namespace definition in another file"
+              (and (= 0 code) (re-find #"defn other-file-user — orgs/o/r/src/a/more.cljk:2" out)) out))
+    (let [h0 (file-hash "c.cljk")]
+      (check! "closure <file> prints a file closure hash" (re-find #"^[0-9a-f]{10}$" (str h0)) (str h0))
+      (write! top "orgs/o/r/src/c.cljk" "(ns c.core)\n;; comment\n(defn leaf [x] x)\n\n(defn top [x] (leaf x))\n")
+      (run top "build" "--full")
+      (check! "a comment / whitespace edit keeps the file closure hash (memo hit)" (= h0 (file-hash "c.cljk")) (str h0 " vs " (file-hash "c.cljk")))
+      (write! top "orgs/o/r/src/c.cljk" "(ns c.core)\n(defn leaf [x] (inc x))\n(defn top [x] (leaf x))\n")
+      (run top "build" "--full")
+      (check! "a body edit changes the file closure hash (memo miss)" (not= h0 (file-hash "c.cljk")) (str h0 " vs " (file-hash "c.cljk"))))
+    (let [{:keys [code out]} (run top "closure" "nope.cljk")]
+      (check! "closure <file> with no such file: exit 1" (and (= 1 code) (re-find #"0 definitions in a file ending with nope.cljk" out)) out))
+    (write! top "orgs/o/r/src/b/core.cljk" "(ns b.core)\n(defn bb [] 1)\n")
+    (run top "build" "--full")
+    (let [{:keys [code out]} (run top "closure" "core.cljk")]
+      (check! "closure <file> with an ambiguous suffix: REFUSE listing the files"
+              (and (= 2 code) (re-find #"REFUSE\tcore.cljk matches 2 files — say which: " out)) out))
+    (let [{:keys [code out]} (run top "closure" "b/core.cljk")]
+      (check! "closure <file> with a longer suffix picks the one file" (and (= 0 code) (re-find #"closure-file orgs/o/r/src/b/core.cljk" out)) out))))
+
 (defn test-version-skew []
   ;; iteration 19: 索引が script より新しいときは build を勧めない (古い写しで新しい索引を潰さない)
   (let [top (mk-tmp "skew")]
@@ -611,6 +644,7 @@
   (test-known-roots)
   (test-refs-dependents-closure)
   (test-version-skew)
+  (test-cross-file-refs-and-file-closure)
   (test-no-index-and-root-discovery)
   (test-stale-json))
 
