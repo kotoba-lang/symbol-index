@@ -408,4 +408,34 @@
   :open [{:what "agent 側の K2/K4/K5 (:h24 :h26 :h30 :h31 :h32 :h34)" :how "hermes のある host で bench/hermes_ab.cljk を腕 D として回す / superproject の scripts/agent-usage-report.cljk --since 7 を翌週回して rr-nowrite を baseline (79%) と比べる"}
          {:what ":h34 の build 時間コスト" :how "v2 と v3 の full build を交互 A/B (未測定)"}
          {:what "kotoba find (-prune 相当が入ったら)" :how ":h33 の条件が満たされたら walk を差し替えて交互 A/B"}]
-  :resume "kbb --backend sci test/symbol_index_test.cljk → 82/0 を確認してから次の仮説へ"}]
+  :resume "kbb --backend sci test/symbol_index_test.cljk → 82/0 を確認してから次の仮説へ"}
+
+ ;; ---- iteration 15 (2026-09-17) — 構造 hash (Unison 型の後半: 名前と本文の分離) ----
+ ;; 再現: cd <superproject>; kbb --backend sci orgs/kotoba-lang/symbol-index/bench/structural_hash.cljk --all --out <edn>
+ ;;       (v3 索引 .kotoba-cache/symbol-index.tsv が要る。--sample 200 なら 1.5 s、--all で 4 min)
+ {:iteration 15 :id :h35-structural-hash
+  :date "2026-09-17"
+  :hypothesis "v3 の text hash (空白畳み sha256) を、reader を通して def 名・局所束縛・docstring・位置 meta を落とした構造 hash に変えると、(1) 名前だけ違う写しが畳まれ (2) rename / comment に不感になり (3) 『変わったのに同じ』を出さない"
+  :method "bench/structural_hash.cljk: 索引の全 file を line-based span で読み直し、edamame (:read-cond :preserve) で第 1 form を parse → %name / %0.. / docstring 除去 / set・map を印字 sort → *print-meta* pr-str → sha256。text hash は隣で同じ span から再計算。壊し方 4 通り × 約 100 定義で両方向を確かめる"
+  :measured {:corpus {:files 47360 :rows 600371 :parsed 599439 :parse-failed 932 :unreadable-files 778
+                      :note "unreadable は索引後に消えた file (retired worktree 等)。parse-failed の 8 割は line-based span が nested def の途中で切れる EOF (索引の idx-based span なら消える)"}
+             :text-hash-recomputed-agrees-with-v3 "593876/599439 (差は line-based span の nested def)"
+             :dup-share {:text 0.390 :struct 0.458 :gain 41135
+                         :note "gain = text では単独だが構造では他と同一の定義数。text 0.390 は v3 README の 0.412 と corpus 差 (unreadable 778 file) の範囲"}
+             :dup-share-nontrivial {:n 491732 :text 181273 :struct 198681 :gain 17409 :note "正規形 60 字以上 (『(def %name 32)』の類を除く)"}
+             :names-per-struct-hash {:1 367834 :2 8087 :3 1471 :4 321 :5+ 800 :max 73
+                                     :example "cloud-itonami/kernels/phase_gate_part_06.kotoba: (defn disposition-commit [d] (eq-flag d 2)) と (defn reason-phase-approval [r] (eq-flag r 2)) は同じ構造 hash に 23 個の名前"}
+             :both-directions {:ws {:n 81 :ok 81} :comment {:n 107 :ok 107} :rename {:n 105 :ok 105} :body {:n 107 :ok 107}
+                               :note "ws/comment/rename → text 異 (ws は同)・struct 同、body (末尾に nil) → 両方異。理由 literal を pin した負テスト"}
+             :text-hash-defect-found {:loss 1
+                                      :what "text hash は文字列リテラル内の改行+空白を畳んで『同じ』と答える。app_test.cljk の testing 文字列が 1 行のものと 2 行に折ったものが text 同・struct 異 (struct が正しい)"
+                                      :also "同じ理由で :ws 変異は複数行文字列を持つ定義では『空白だけ』にならず、初回は 4 件が偽赤 → 変異側を直した"}
+             :fixed-while-measuring [":loss 3 → 1: regex は値等価を持たず set 内の順序が parse ごとに揺れた → set / map を印字 sort した canonical 形に (fmt に委ねる部分)"
+                                     "syntax-quote の gensym a__12__auto__ の番号を落とす"]
+             :wall {:all-s 229 :sample-200-s 1.5}}
+  :not-measured ["参照先 hash への置換 (Merkle)。依存が変わっても自分の hash は変わらない —— ここは未実装であって『不要』ではない"
+                 "macro 展開後の同一性 (展開前の形で hash している。syntactic-structural であって semantic ではない)"
+                 "索引 build 時間への影響 (bench は索引を読み直す別経路。build に組み込んだ A/B は次)"
+                 "agent 側 (hermes) の call 数・token への効果"]
+  :verdict :measured-not-landed
+  :next "scan-file の content-hash の隣に struct hash 列を足し (TSV v4)、find の (+N identical) と outline の変更検知を struct 側に切り替えて A/B。名前→hash の naming 面を別 file にするかはその後"}]
