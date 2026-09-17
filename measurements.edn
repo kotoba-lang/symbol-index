@@ -571,4 +571,21 @@
             :claude-G "9/10、6.1 tool —— 索引そのものではなく『root 写しの drift』と『新しい口が入口文書に無い』の 2 つが費用"}
   :landed-as-iteration-19 ["版ずれの向きで REFUSE 文を変える: 索引が script より新しいときは『新しい script を使え、この写しで build するな』(build すると古い版で索引を潰す)" "find の出力末尾に `(who references it: find <sym> --dependents | closure <ns>/<sym>)` の 1 行" "bench: q9 / q10 / --agent claude / 全出現 grade / --max-turns 15"]
   :not-landed ["superproject 本体 checkout の root 写しの同期 (本体は触らない規則。main には da084e1 で同期済み、本体が main に追いつけば消える)" "CLAUDE.md の 1 行に --dependents / closure を足す (superproject 側、次)"]
-  :verdict :landed}]
+  :verdict :landed}
+
+ ;; ---- closing 2026-09-18 (session 2026-09-17: iteration 15–19) ----
+ {:id :closing-2026-09-18
+  :date "2026-09-18"
+  :landed {:symbol-index "main 4b5c48d (iteration 15 構造 hash v4 → 16 登録簿 fallback / --unfold → 17 closure bench → 18 参照列 v5 / find --dependents / closure → 19 腕 G/H / 版ずれ文言 / --dependents ヒント)。test 118/0。skill と ~/.local/bin/symbol-index は install --check clean"
+           :superproject "main 29cb0e6: west pin symbol-index → 4b5c48d (3c91f06)、root scripts/symbol-index.cljk は blob 0ce8e8f1 で上流と同一、CLAUDE.md の索引行に --dependents / closure / 版ずれ規則 (AGENTS.md 再生成済み)"
+           :kotoba-lang.org "main 37d504b: llms.txt / llms-full.txt に『Navigating Kotoba source as an agent』節。Cloudflare 自動 deploy、live 確認"
+           :kotoba.cloud "main dcfa45e2: 同節。npm run deploy → Version 61836dae-4d7e-4010-ad74-a4b46d76dea2、live 確認"}
+  :evidence {:bench-results "bench/results/2026-09-17-{D,E,F,G,H}.jsonl (+ .regraded)、structural_hash_all / closure_hash_all の edn" :ledger ":h35 – :h41"}
+  :verification "symbol-index test 118/0 (壊し方の反証: 3 通り × iteration 15/16/18)。kotoba-lang site build 20,797 assertions 0 failures。app-kotoba-cloud npm test 202 tests 0 failures + audit + worker/workerd tests + wrangler deploy"
+  :open [{:what "hermes 以外の agent (Claude Code) で --dependents を使わせる" :how "CLAUDE.md には入れた (29cb0e6)。腕 G を再走: `kbb --backend sci orgs/kotoba-lang/symbol-index/bench/hermes_ab.cljk G2-claude <out> --agent claude` → q9 が OK になり tool call が 6.1 から下がるかを見る ($0.8/query)"}
+         {:what "参照列の穴: 同 ns の別 file にある定義への bare 参照が落ちる" :how "scan-file の local-syms を file から ns 単位に (build 時に ns → 定義名の表が要る = 2 pass)。効果は bench/closure_hash.cljk の :refs で測る"}
+         {:what "closure hash を memo key に使う実装 (compile / test 結果の cache)" :how "plugin-hermes の kotoba_check に closure を key にした cache を足し、hit 率を測る。:h39 の blast radius (最大 60,957) が無効化の上限"}
+         {:what "kotoba-lang / app-kotoba-cloud の west pin" :how "docs のみの変更なので進めていない。進めるなら scripts/west-pin-put.cljk kotoba-lang 37d504b / app-kotoba-cloud dcfa45e2"}
+         {:what "app-kotoba-cloud の deploy 前提 2 つ (contracts/out の ABI = forge build、amu が PATH に無い)" :how "README の deploy 手順に前提として書くか、npm run deploy の先頭で検出して名指しで拒否する。今朝の mktg tick も amu 127 で止まっていた"}]
+  :preserved-owner-wip ["superproject 本体 checkout: dirty 99 file (他 session の tick)" "orgs/kotoba-lang/kotoba-lang: dirty 123 file (hook が『触るな』)" "orgs/kotoba-lang/app-kotoba-cloud: HEAD 094f7693 dirty 18 (他 session が進めた)" "kotoba-lang の open PR 6 件 (#675–#698、他 agent)" "superproject の worktree 10 本 (bot fleet)"]
+  :resume "cd <superproject>; kbb --backend sci orgs/kotoba-lang/symbol-index/test/symbol_index_test.cljk → 118/0 を確認 → symbol-index kagami.db/apply-pin-advance --dependents が 7 件出ることを確認 → 上の :open の 1 つ目から"}]
