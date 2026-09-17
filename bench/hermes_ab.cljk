@@ -188,7 +188,7 @@
   "腕 = Claude Code headless (`claude -p … --output-format json`)。CLAUDE.md の 1 行 (Read の前に索引を引く) が
   効くかを測る。build は disallow (古い root の写しで新しい索引を潰さない)。"
   [{:keys [id] :as q} {:keys [condition out-dir]}]
-  (let [args ["-p" (prompt-for q) "--output-format" "json" "--allowedTools" "Bash,Read,Grep,Glob" "--max-turns" "8"
+  (let [args ["-p" (prompt-for q) "--output-format" "json" "--allowedTools" "Bash,Read,Grep,Glob" "--max-turns" "15"
               "--disallowedTools" "Bash(kbb --backend sci scripts/symbol-index.cljk build:*)"]
         t0 (now-ms)
         r (.spawnSync cp "claude" (clj->js args)

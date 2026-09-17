@@ -148,6 +148,20 @@ root corpus の実測: **定義の 41.2% (233,858 / 567,719) は他と本文が�
 agent はこう使う: 変更の有無は `cat` でなく `outline` の hash 比較 (file の 1/5.7)。`find` の
 `(+N identical)` の写しは読まない。stale file の `re-located … body unchanged` なら読み直さない。
 
+### iteration 19 (2026-09-17) — Claude Code の腕、task 形 2 つ、版ずれの誤導
+
+| 腕 | 正解 | tool call | API call | token | file read |
+|---|---|---|---|---|---|
+| H: hermes + iteration 18 (q1–q10、被依存 / closure 込み) | **10/10** | **1.5** | **2.5** | 46,604 | 0 |
+| G: Claude Code headless (CLAUDE.md の 1 行のみ、root 写しは v4) | 9/10 | 6.1 | 7.1 | 438,416 | 11 |
+
+G の費用は索引ではなく 2 つの穴: ① superproject 本体の root 写し `scripts/symbol-index.cljk` が v4 のまま
+v5 索引を REFUSE し、10/10 で agent が上流を探して復旧した (+3〜5 call)。拒否文が「run build」だと古い版で
+索引を作り直して潰すので、**索引の方が新しいときは『新しい script を使え、この写しで build するな』**に変えた。
+② `--dependents` を知らず (CLAUDE.md にも写しにも無い) `rg` で探して turn 上限 → `find` の出力末尾に
+被依存と closure の口を 1 行出す。**新しい口は出力と入口文書に書かないと使われない。**
+bench には q9 (被依存 7 件)、q10 (closure、期待は実行直前に取る)、`--agent claude` を足した。
+
 ### iteration 18 (2026-09-17) — 参照列 (v5)、`find --dependents`、`closure`
 
 iteration 17 の closure hash を索引の列にはせず、**参照だけを 8 列目に持ち、解決は query 時**にした。

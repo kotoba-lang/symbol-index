@@ -1039,6 +1039,10 @@
               (when-let [note (relocation-note h)] (println note))
               (when-not gone (println (snippet file line))))))
         (when (zero? n) (suggest-near text (first leafs) keep?))
+        ;; iteration 19: 被依存の口を 1 行で示す (09-17 の Claude Code 腕 G q9: --dependents を知らず rg で探して
+        ;; turn 上限。新しい口は出力に書かないと使われない)
+        (when (pos? n)
+          (println (str "  (who references it: find " (first leafs) " --dependents  |  identity incl. dependencies: closure <ns>/" (first leafs) ")")))
         (if (seq hits) 0 1)))))
 
 (defn- cmd-show

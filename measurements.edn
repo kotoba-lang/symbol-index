@@ -551,4 +551,24 @@
                  {:broke "closure が依存先の hash を入れない" :red "changing a leaf dependency changes the closure of the root (+ SCC partner)"}]
   :known-gaps ["同 ns の別 file の定義への bare 参照は落ちる (file 単位で local-syms を決めている)" "alias 先が索引に無い ns (clojure.string 等) の参照は列に残る (query 時に解決できず落ちるだけ)" "macro 展開後の参照は見ない"]
   :not-measured ["agent 側 (--dependents を含む task 形での A/B、次の :h41)"]
+  :verdict :landed}
+
+ ;; ---- iteration 19 (2026-09-17) — 腕 G (Claude Code headless) / 腕 H (hermes + iteration 18)、task 形 2 つ追加 ----
+ ;; 再現: export PATH=$HOME/.hermes/hermes-agent/venv/bin:$PATH; cd <superproject>
+ ;;       kbb --backend sci orgs/kotoba-lang/symbol-index/bench/hermes_ab.cljk H-iter18 <out> --skills symbol-index
+ ;;       kbb --backend sci orgs/kotoba-lang/symbol-index/bench/hermes_ab.cljk G-claude <out> --agent claude   (claude -p、$0.8/query)
+ {:iteration 19 :id :h41-agents-and-task-shapes
+  :date "2026-09-17"
+  :observation "D–F は hermes の lookup 8 query だけ。hermes 以外の agent と、lookup 以外の task 形 (被依存の列挙 / closure hash) が未測定"
+  :added-to-bench ["q9: `kagami.db/apply-pin-advance` を変えたら影響を受ける定義を全部 (期待 7: bin の cmd-* 3 + deftest 4)" "q10: その closure hash (期待は走らせる直前に `symbol-index closure` で取る)" "--agent claude: claude -p --output-format json、tool 列は ~/.claude/projects/<slug>/<session>.jsonl の tool_use から" "grade: 同 file の複数 hit のため basename の全出現を見る"]
+  :arm-H {:condition "hermes + skill (規則 0 / --unfold / --dependents / closure) + iteration 18 CLI" :n 10
+          :correct "10/10" :timeouts 0 :tool-calls-mean 1.5 :si-mean 1.1 :api-mean 2.5 :total-tok-mean 46604 :file-reads 0 :wall-mean-s 112
+          :q9 "find --dependents を最初に引いて 7 件正解 (3 tool: 裏取りの grep と sed。prompt が『読んで確かめよ』)" :q10 "closure 1 tool / 18 s" :q8 "4 tool、580 s (API 待ち) だが正解"}
+  :arm-G {:condition "Claude Code headless、CLAUDE.md の 1 行 (Read の前に索引を引く) のみ。superproject 本体 checkout の root 写し scripts/symbol-index.cljk は v4 のまま (本体は mktg-tick branch で main から 20 遅れ、規則で触らない)" :n 10
+          :correct "9/10" :timeouts 0 :tool-calls-mean 6.1 :si-mean 2.3 :api-mean 7.1 :total-tok-mean 438416 :file-reads 11 :wall-mean-s 90 :cost-usd 8.02
+          :finding "10/10 で root 写し (v4) が v5 索引を REFUSE → status / grep / 上流 orgs/kotoba-lang/symbol-index を探して復旧 (+3〜5 tool)。q9 は --dependents を知らず (CLAUDE.md にも v4 写しにも無い) rg で探して turn 上限 8 で答え無し。token は cache read が 9 割 (CLAUDE.md + hook の文脈 ≈ 190k/turn)"}
+  :summary {:hermes-D->H {:correct ["7/8" "10/10"] :tool-calls [3.1 1.5] :api [4.0 2.5] :total-tok [72798 46604] :timeouts [1 0]}
+            :claude-G "9/10、6.1 tool —— 索引そのものではなく『root 写しの drift』と『新しい口が入口文書に無い』の 2 つが費用"}
+  :landed-as-iteration-19 ["版ずれの向きで REFUSE 文を変える: 索引が script より新しいときは『新しい script を使え、この写しで build するな』(build すると古い版で索引を潰す)" "find の出力末尾に `(who references it: find <sym> --dependents | closure <ns>/<sym>)` の 1 行" "bench: q9 / q10 / --agent claude / 全出現 grade / --max-turns 15"]
+  :not-landed ["superproject 本体 checkout の root 写しの同期 (本体は触らない規則。main には da084e1 で同期済み、本体が main に追いつけば消える)" "CLAUDE.md の 1 行に --dependents / closure を足す (superproject 側、次)"]
   :verdict :landed}]
