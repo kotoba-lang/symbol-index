@@ -51,15 +51,58 @@
       (let [up (.dirname path d)]
         (if (= up d) nil (recur up))))))
 
+(def os (js/require "node:os"))
+
+(def roots-file
+  "build が索引の root を 1 行ずつ記録する登録簿 (新しい順、realpath)。cwd の外から呼ばれた
+  ときの fallback にだけ使う。"
+  (.join path (.homedir os) index-dir "symbol-index-roots"))
+
+(defn- known-roots
+  "登録簿の root のうち、今も索引を持つもの (新しい順)。登録簿が無ければ []。"
+  []
+  (try
+    (->> (str/split-lines (.readFileSync fs roots-file "utf8"))
+         (map str/trim) (remove empty?) distinct
+         (filterv #(.existsSync fs (.join path % index-dir index-file))))
+    (catch :default _ [])))
+
+(defn- remember-root!
+  "build 後に root を登録簿の先頭へ (重複は消す)。失敗しても build は失敗にしない。"
+  [root]
+  (try
+    (let [dir (.dirname path roots-file)
+          old (try (str/split-lines (.readFileSync fs roots-file "utf8")) (catch :default _ []))
+          rows (into [root] (remove #{root ""} (map str/trim old)))]
+      (.mkdirSync fs dir #js{:recursive true})
+      (.writeFileSync fs roots-file (str (str/join "\n" (take 20 rows)) "\n")))
+    (catch :default _ nil)))
+
+(def ^:private top-fallback-note
+  "cwd にも祖先にも索引が無く、登録簿の唯一の root で答えたときに 1 行目に出す注記。nil なら通常。"
+  (volatile! nil))
+
 (def top
   "索引の root。優先順: SYMBOL_INDEX_ROOT > CLAUDE_PROJECT_DIR > 索引を持つ最寄りの
-  祖先 dir > cwd。cwd に落ちるのは build のときだけ意味がある (find/show は索引が
-  無ければ拒否する —— 以前は $HOME で呼ばれて home 全体を走査し、Hermes の terminal
-  tool の 120s timeout に当たった)。"
-  (let [chosen (or (not-empty (.-SYMBOL_INDEX_ROOT (.-env js/process)))
-                   (not-empty (.-CLAUDE_PROJECT_DIR (.-env js/process)))
-                   (nearest-indexed-ancestor (.cwd js/process))
-                   (.cwd js/process))]
+  祖先 dir > (iteration 16) 登録簿の root がちょうど 1 つならそれ > cwd。cwd に落ちるのは
+  build のときだけ意味がある (find/show は索引が無ければ拒否する —— 以前は $HOME で
+  呼ばれて home 全体を走査し、Hermes の terminal tool の 120s timeout に当たった)。
+  登録簿の fallback は **読むだけ** (build はしない)。09-17 の Hermes 腕 D で 8 query 中 7 が
+  $HOME から呼んで REFUSE され、6 が REFUSE 文に従って build を走らせた (1 query あたり
+  +1.1 tool call、+43% token) —— 索引が在るのに場所を知らないだけだった。"
+  (let [env-root (or (not-empty (.-SYMBOL_INDEX_ROOT (.-env js/process)))
+                     (not-empty (.-CLAUDE_PROJECT_DIR (.-env js/process))))
+        anc (when-not env-root (nearest-indexed-ancestor (.cwd js/process)))
+        argv (vec (js->clj (.-argv js/process)))
+        building? (some #{"build"} argv)
+        roots (when-not (or env-root anc building?) (known-roots))
+        chosen (cond env-root env-root
+                     anc anc
+                     (= 1 (count roots)) (do (vreset! top-fallback-note
+                                                      (str "(using index root " (first roots) " — cwd " (.cwd js/process)
+                                                           " has none; cd there or set SYMBOL_INDEX_ROOT to silence this)"))
+                                             (first roots))
+                     :else (.cwd js/process))]
     ;; header の top と文字列比較するので realpath に揃える (macOS の /var → /private/var、
     ;; env で symlink 側の path を渡された場合に top 不一致で拒否していた実測)。
     (try (.realpathSync fs chosen) (catch :default _ chosen))))
@@ -555,6 +598,7 @@
       (refuse "scanned 0 files under " top " — empty tree or wrong top (set CLAUDE_PROJECT_DIR or cd)")
       (do (write-index built)
           (println (str "indexed " symbols " symbols -> " index-dir "/" index-file))
+          (remember-root! top)
           0))))
 
 (defn- load-index-text
@@ -564,8 +608,14 @@
   (Hermes Agent で実測)。build は明示の `build` だけ。"
   []
   (let [p (index-path)]
+    (when-let [n @top-fallback-note] (println n))
     (if-not (.existsSync fs p)
-      {:error (str "no index at " p " — run `symbol-index build` at the project root (or set SYMBOL_INDEX_ROOT)")}
+      {:error (let [roots (known-roots)]
+                (str "no index at " p " — "
+                     (if (seq roots)
+                       (str "cd to an indexed root and retry (or set SYMBOL_INDEX_ROOT): " (str/join " | " roots)
+                            ". Do not build here.")
+                       "cd to the project root and retry (or set SYMBOL_INDEX_ROOT); only if the root itself has no index, run `symbol-index build` there (never in $HOME)")))}
       (let [text (.readFileSync fs p "utf8")
             h (parse-header text)]
         (cond
@@ -704,7 +754,8 @@
       (let [in-idx (.indexOf (to-array args) "--in")
             in-filter (when (and (>= in-idx 0) (< (inc in-idx) (count args))) (nth args (inc in-idx)))
             exact? (some #{"--exact"} args)
-            terms (->> args (remove #{"--exact"}) (remove #{"--in"}) (remove #{in-filter}))
+            unfold? (some #{"--unfold"} args)
+            terms (->> args (remove #{"--exact" "--unfold"}) (remove #{"--in"}) (remove #{in-filter}))
             split-ns (fn [t] (let [i (.lastIndexOf t "/")] (if (pos? i) [(subs t 0 i) (subs t (inc i))] [nil t])))
             leafs (map (comp second split-ns) terms)
             nss (keep (comp first split-ns) terms)
@@ -722,16 +773,21 @@
                         ;; 同じ本文なら別 repo・別行・別拡張子でも 1 行、本文が違えば別 (行が同じでも)
                         (group-by (fn [{:keys [sym kind hash]}] [sym kind hash]))
                         vals
-                        (map (fn [grp] (assoc (first grp) :copies (dec (count grp)))))
+                        (map (fn [grp] (assoc (first grp) :copies (dec (count grp)) :copy-rows (rest grp))))
                         (sort-by #(rank-key term0 %)))
             n (count ranked)
             exact (filter #(zero? (first (rank-key term0 %))) ranked)]
         (println (str "indexed " (:symbols header) " symbols, " n " hits for " (str/join " " terms)
-                      (when (> (count hits) n) (str " (" (- (count hits) n) " identical folded)"))
+                      (when (> (count hits) n) (str " (" (- (count hits) n) " identical folded" (if unfold? ", listed" "; --unfold lists them") ")"))
                       (when in-filter (str " --in " in-filter)) (when exact? " --exact")))
         (age-warning header)
         (if (<= n find-limit)
-          (doseq [h ranked] (println (fmt-hit h)))
+          (doseq [h ranked]
+            (println (fmt-hit h))
+            ;; iteration 16: --unfold で畳んだ写しの file:line を出す。09-17 の Hermes 腕 D q8 は
+            ;; 「写しの file:line も」を TSV の直接 grep で出そうとして 600 s で時間切れになった
+            (when unfold?
+              (doseq [c (:copy-rows h)] (println (str "      = " (:file c) ":" (:line c))))))
           (let [n-exact (count exact)
                 repos (map (comp repo-of :file) ranked)
                 by-repo (->> repos frequencies (sort-by (comp - val)) (take 12))]
@@ -887,7 +943,7 @@
   (println "usage: kbb --backend sci scripts/symbol-index.cljk <query> | build|find|show|outline|status [args]")
   (println "  <query> — no subcommand needed: *.cljk / a.b → outline, a.b/c → show, anything else → find")
   (println "  build [--include-worktrees] [--no-prune] [--full] — scan .cljk/.cljc/.cljs/.clj/.kotoba and write the index")
-  (println "  find <term|ns/term> [term...] [--in <path-substr>] [--exact] — symbol name search (exit 1 = 0 hits)")
+  (println "  find <term|ns/term> [term...] [--in <path-substr>] [--exact] [--unfold] — symbol name search (exit 1 = 0 hits; --unfold lists folded copies)")
   (println "  show <symbol|ns/symbol> — definition snippet (file:line + context lines)")
   (println "  outline <file-suffix|ns> [--bare] — every definition in a file/namespace with its signature (map before Read)")
   (println "  status — index header (top / built-at / scanned / symbols) and age")
