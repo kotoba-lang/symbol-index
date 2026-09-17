@@ -679,7 +679,14 @@
             h (parse-header text)]
         (cond
           (nil? h) {:error "index is not a TSV index (stale JSON?) — run build"}
-          (not= (:version h) index-version) {:error (str "index is " (:version h) ", this script needs " index-version " — run build")}
+          ;; iteration 19: 版ずれの向きで文言を変える。索引の方が新しい = この script の写しが古い (root の写しが
+          ;; 上流に遅れる形。09-17 に Claude Code が v4 の写しで v5 索引を引いて拒否された)。そこで build を勧めると
+          ;; 古い版で索引を作り直して新しい索引を潰す —— 新しい script を使えと言う
+          (not= (:version h) index-version)
+          {:error (let [idx (js/parseInt (subs (:version h) 1) 10) me (js/parseInt (subs index-version 1) 10)]
+                    (if (> idx me)
+                      (str "index is " (:version h) " but this script copy is " index-version " (older) — use the newer script (`symbol-index` on PATH, or orgs/kotoba-lang/symbol-index/scripts/symbol-index.cljk); do NOT build with this copy, it would downgrade the index")
+                      (str "index is " (:version h) ", this script needs " index-version " — run build")))}
           (not= (:top h) top) {:error (str "index was built for top=" (:top h) " but cwd top=" top " — run build here")}
           (= "0" (:symbols h)) {:error (str "index has 0 symbols (scanned " (:scanned h) " files) — run build")}
           :else {:header h :text text})))))

@@ -4,6 +4,7 @@
 ;;
 ;;   kbb --backend sci bench/hermes_ab.cljk <condition> <out.json> [--skills symbol-index] [--only q1,q2]
 ;;   kbb --backend sci bench/hermes_ab.cljk <condition> <out.json> --regrade   # 保存済み answer を今の表で採点し直す
+;;   kbb --backend sci bench/hermes_ab.cljk <condition> <out.json> --agent claude   # 腕 = Claude Code headless (claude -p)
 ;;
 ;; condition は結果に刻む label。実測した 4 腕:
 ;;   A-baseline   skill 無し・AGENTS.md に symbol-index の記述無し (= 導入前)
@@ -50,15 +51,33 @@
     :expect [{:path "orgs/kotoba-lang/vmm/kotoba/arm64_boot_core.kotoba" :line 41}]}
    {:id "q7" :sym "write-manifest"
     :expect [{:path "orgs/kotoba-lang/org-apache-iceberg/src/iceberg/manifest.cljk" :line 98}]}
+   ;; iteration 19: lookup 以外の task 形。q9 = 被依存の列挙 (find --dependents)、q10 = closure hash (依存先込み identity)
+   {:id "q9" :sym "kagami.db/apply-pin-advance" :dependents true
+    :expect [{:path "orgs/kotoba-lang/kagami/bin/kagami.cljk" :line 587}
+             {:path "orgs/kotoba-lang/kagami/bin/kagami.cljk" :line 507}
+             {:path "orgs/kotoba-lang/kagami/bin/kagami.cljk" :line 446}
+             {:path "orgs/kotoba-lang/kagami/test/kagami/core_test.cljk" :line 168}
+             {:path "orgs/kotoba-lang/kagami/test/kagami/core_test.cljk" :line 365}
+             {:path "orgs/kotoba-lang/kagami/test/kagami/core_test.cljk" :line 572}
+             {:path "orgs/kotoba-lang/kagami/test/kagami/core_test.cljk" :line 464}]}
+   ;; 期待 hash は表に固定せず、走らせる直前に `symbol-index closure` で取る (code が変われば hash も変わる)
+   {:id "q10" :sym "kagami.db/apply-pin-advance" :closure true :expect-cmd ["closure" "kagami.db/apply-pin-advance"]}
    {:id "q8" :sym "capability-catalog" :multi true
     :expect [{:path "orgs/kotoba-lang/kotoba-sema/src/kotoba/compiler/frontend.cljk" :line 187}
              {:path "orgs/kotoba-lang/kotoba-component/src/kotoba/component/wasi_contract.cljk" :line 63}
              {:path "orgs/cloud-itonami/cloud-itonami-app/src/cloud/itonami/app/tenant_connection.cljk" :line 20}]}])
 
-(defn prompt-for [{:keys [sym multi]}]
-  (if multi
+(defn prompt-for [{:keys [sym multi dependents closure]}]
+  (cond
+    dependents
+    (str "`" sym "` を変更したら影響を受ける (それを参照している) 定義を、この superproject の中から全部 file:line で挙げて。"
+         "test も含む。読んで確かめずに推測で答えないこと。")
+    closure
+    (str "`" sym "` の closure hash (依存先の本文まで含めた Merkle hash、10 桁の hex) を答えて。推測で答えないこと。")
+    multi
     (str "この superproject の中で top-level に `" sym "` という名前で定義されているものを全部挙げて。"
          "それぞれ file:line 形式で。読んで確かめずに推測で答えないこと。")
+    :else
     (str "`" sym "` はこの superproject のどこで定義されている？ "
          "定義の file:line と、その定義の冒頭 5 行を示して。読んで確かめずに推測で答えないこと。")))
 
@@ -104,15 +123,21 @@
   (let [nums (map js/parseInt (re-seq #"\d+" text))]
     (boolean (some #(<= (Math/abs (- % line)) 2) nums))))
 
+(defn- occurrences [answer base]
+  (loop [from 0 acc []]
+    (let [i (.indexOf answer base from)]
+      (if (neg? i) acc (recur (inc i) (conj acc i))))))
+
 (defn grade [answer expect]
   (let [hits (for [{p :path line :line} expect
                    :let [base (.basename path p)
                          repo (nth (str/split p #"/") 2)
                          base-ok (str/includes? answer base)
-                         ;; 行番号は basename の直後 200 字で見る (別 hit の数字を拾わない)
-                         idx (.indexOf answer base)
-                         near (if (neg? idx) "" (subs answer idx (min (count answer) (+ idx 200))))
-                         line-ok (and base-ok (line-near? near line))
+                         ;; 行番号は basename の直後 200 字で見る (別 hit の数字を拾わない)。同じ file の複数 hit
+                         ;; (q9 の kagami.cljk:587 / :507 / :446) のため、basename の出現を全部見る (iteration 19)
+                         line-ok (and base-ok
+                                      (boolean (some (fn [idx] (line-near? (subs answer idx (min (count answer) (+ idx 200))) line))
+                                                     (occurrences answer base))))
                          repo-ok (str/includes? answer repo)]]
                {:path p :base-ok base-ok :line-ok line-ok :repo-ok repo-ok})]
     ;; correct = basename + 行番号 ±2 (全 hit)。full-path はさらに repo dir 名も出ている。
@@ -120,6 +145,76 @@
      :correct (every? :line-ok hits)
      :full-path (every? #(and (:line-ok %) (:repo-ok %)) hits)
      :path-only (and (every? :base-ok hits) (not (every? :line-ok hits)))}))
+
+(defn expect-of
+  "q の期待。:expect-cmd があれば走らせる直前に `symbol-index` で取る (closure hash)。"
+  [q]
+  (if-let [cmd (:expect-cmd q)]
+    (let [r (.spawnSync cp "symbol-index" (clj->js cmd) #js {:cwd superproject :encoding "utf8"})
+          h (second (re-find #"  #([0-9a-f]{10})  \(structural" (str (.-stdout r))))]
+      (if h {:text h} {:text "NO-EXPECT"}))
+    {:paths (:expect q)}))
+
+(defn grade-q [answer q]
+  (let [{:keys [text paths]} (expect-of q)]
+    (if text
+      (let [ok (and (not= text "NO-EXPECT") (str/includes? answer text))]
+        {:hits [{:text text :line-ok ok}] :correct ok :full-path ok :path-only false})
+      (grade answer paths))))
+
+(def os (js/require "node:os"))
+
+(defn claude-session-tools
+  "Claude Code の transcript (~/.claude/projects/<cwd slug>/<session_id>.jsonl) から tool_use を数える。
+  hermes の session-tools と同じ形 {:tool-calls :by-tool :symbol-index-calls :file-reads}。無ければ nil。"
+  [sid]
+  (let [slug (str/replace superproject #"/" "-")
+        f (.join path (.homedir os) ".claude" "projects" slug (str sid ".jsonl"))]
+    (when (.existsSync fs f)
+      (let [uses (for [l (str/split-lines (.readFileSync fs f "utf8")) :when (seq l)
+                       :let [d (try (js->clj (js/JSON.parse l) :keywordize-keys true) (catch :default _ nil))]
+                       c (let [m (:message d)] (when (vector? (:content m)) (:content m)))
+                       :when (= "tool_use" (:type c))]
+                   c)
+            cli-re #"symbol-index(?:\.cljk)?\s+\S"
+            cmds (map #(str (get-in % [:input :command])) uses)]
+        {:tool-calls (count uses)
+         :by-tool (frequencies (map :name uses))
+         :symbol-index-calls (count (filter #(re-find cli-re %) cmds))
+         :file-reads (+ (count (filter #(= "Read" (:name %)) uses))
+                        (count (filter #(re-find #"^(cat|sed -n|head|tail) " %) cmds)))}))))
+
+(defn run-one-claude
+  "腕 = Claude Code headless (`claude -p … --output-format json`)。CLAUDE.md の 1 行 (Read の前に索引を引く) が
+  効くかを測る。build は disallow (古い root の写しで新しい索引を潰さない)。"
+  [{:keys [id] :as q} {:keys [condition out-dir]}]
+  (let [args ["-p" (prompt-for q) "--output-format" "json" "--allowedTools" "Bash,Read,Grep,Glob" "--max-turns" "8"
+              "--disallowedTools" "Bash(kbb --backend sci scripts/symbol-index.cljk build:*)"]
+        t0 (now-ms)
+        r (.spawnSync cp "claude" (clj->js args)
+                      #js {:cwd superproject :encoding "utf8" :timeout timeout-ms
+                           :maxBuffer (* 64 1024 1024) :env (.-env js/process)})
+        elapsed (/ (- (now-ms) t0) 1000)
+        timed-out? (some? (.-signal r))
+        d (try (js->clj (js/JSON.parse (str (.-stdout r))) :keywordize-keys true) (catch :default _ nil))
+        u (:usage d)
+        answer (str (:result d))
+        sid (:session_id d)
+        tools (when sid (claude-session-tools sid))
+        g (grade-q answer q)]
+    (.writeFileSync fs (.join path out-dir (str condition "-" id "-answer.txt")) answer)
+    (merge {:condition condition :id id :sym (:sym q) :agent "claude-code"
+            :elapsed-s elapsed :timed-out timed-out? :exit (.-status r) :session-id sid
+            :input-tokens (:input_tokens u)
+            :cache-read-tokens (or (:cache_read_input_tokens u) 0)
+            :cache-write-tokens (or (:cache_creation_input_tokens u) 0)
+            :total-tokens (+ (or (:input_tokens u) 0) (or (:cache_read_input_tokens u) 0) (or (:cache_creation_input_tokens u) 0) (or (:output_tokens u) 0))
+            :output-tokens (:output_tokens u)
+            :api-calls (:num_turns d)
+            :cost-usd (:total_cost_usd d)
+            :answer-chars (count answer)}
+           tools
+           (select-keys g [:correct :full-path :path-only :hits]))))
 
 (defn run-one [{:keys [id] :as q} {:keys [condition skills out-dir]}]
   (let [usage-file (.join path out-dir (str condition "-" id "-usage.json"))
@@ -139,7 +234,7 @@
         row (when sid (session-row sid))
         tools (when sid (session-tools sid))
         answer (str (.-stdout r))
-        g (grade answer (:expect q))]
+        g (grade-q answer q)]
     (.writeFileSync fs (.join path out-dir (str condition "-" id "-answer.txt")) answer)
     (merge {:condition condition :id id :sym (:sym q)
             :elapsed-s elapsed :timed-out timed-out? :exit (.-status r)
@@ -174,9 +269,9 @@
                    :let [f (.join path out-dir (str condition "-" (:id q) "-answer.txt"))
                          r (get ran (:id q))]]
                (if (.existsSync fs f)
-                 (let [g (grade (.readFileSync fs f "utf8") (:expect q))]
-                   (merge (select-keys r [:session-id :elapsed-s :total-tokens :input-tokens :output-tokens :api-calls :cost-usd])
-                          (when (:session-id r) (session-tools (:session-id r)))
+                 (let [g (grade-q (.readFileSync fs f "utf8") q)]
+                   (merge (select-keys r [:session-id :agent :elapsed-s :total-tokens :input-tokens :output-tokens :api-calls :cost-usd])
+                          (when (:session-id r) (if (= "claude-code" (:agent r)) (claude-session-tools (:session-id r)) (session-tools (:session-id r))))
                           (select-keys g [:correct :full-path :path-only :hits])
                           {:id (:id q) :sym (:sym q) :graded-with queries-verified-on}))
                  {:id (:id q) :sym (:sym q) :missing-answer f}))
@@ -195,6 +290,7 @@
     (cond
       (empty? a) m
       (= "--regrade" (first a)) (recur (next a) (assoc m :regrade true))
+      (= "--agent" (first a)) (recur (nnext a) (assoc m :agent (second a)))
       (= "--skills" (first a)) (recur (nnext a) (update m :skills conj (second a)))
       (= "--only" (first a)) (recur (nnext a) (assoc m :only (set (str/split (second a) #","))))
       (nil? (:condition m)) (recur (next a) (assoc m :condition (first a)))
@@ -203,17 +299,19 @@
 
 (let [argv (vec (drop 1 (rest (.-argv js/process))))
       argv (if (str/ends-with? (first argv "") ".cljk") (vec (rest argv)) argv)
-      {:keys [condition out skills only regrade?]} (parse-args argv)
+      {:keys [condition out skills only regrade? agent]} (parse-args argv)
       regrade? (:regrade (parse-args argv))]
   (when-not (and condition out)
-    (println "usage: hermes_ab.cljk <condition> <out.json> [--skills NAME]... [--only q1,q2] | <condition> <out.json> --regrade")
+    (println "usage: hermes_ab.cljk <condition> <out.json> [--skills NAME]... [--only q1,q2] [--agent claude] | <condition> <out.json> --regrade")
     (.exit js/process 2))
   (when regrade? (regrade condition out))
   (let [out-dir (.dirname path out)
         qs (if only (filter #(only (:id %)) queries) queries)
         results (doall
                  (for [q qs]
-                   (let [r (run-one q {:condition condition :skills skills :out-dir out-dir})]
+                   (let [r (if (= agent "claude")
+                             (run-one-claude q {:condition condition :out-dir out-dir})
+                             (run-one q {:condition condition :skills skills :out-dir out-dir}))]
                      ;; 途中で殺されても query 単位の結果が残るよう JSONL に追記する
                      (.appendFileSync fs (str out ".jsonl") (str (js/JSON.stringify (clj->js r)) "\n"))
                      (println (str condition " " (:id q) " " (:sym q)
