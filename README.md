@@ -148,6 +148,42 @@ root corpus の実測: **定義の 41.2% (233,858 / 567,719) は他と本文が�
 agent はこう使う: 変更の有無は `cat` でなく `outline` の hash 比較 (file の 1/5.7)。`find` の
 `(+N identical)` の写しは読まない。stale file の `re-located … body unchanged` なら読み直さない。
 
+### iteration 21 (2026-09-18) — 導入の実測と費用の内訳、出力に証拠を同梱
+
+朝の superproject 本体は root 写し v5 / 索引 v2 で `find` が 10/10 REFUSE、hermes は skill が 09-15 の写しで
+先読み無し、plugin-hermes 未導入だった。直してから測った (腕 G3 = Claude Code、腕 I = hermes `auto_load` のみ):
+
+| 腕 | 正解 | tool/q | API/q | tok/q | file read |
+|---|---|---|---|---|---|
+| G (09-17、写しが索引を REFUSE = 朝と同じ形) | 9/10 | 6.1 | 7.1 | 438k | 11 |
+| **G3 (v5 rebuild 後)** | **10/10** | 3.5 | 4.5 | 278k | 1 |
+| I (hermes、`-s` 無し・`skills.auto_load` だけ、q1–q3) | 3/3 | 1.0 | 2.0 | 38k | 0 |
+
+I は `-s` 先読み腕 H (35k / 1 tool) と同じ形 —— `auto_load` は効いている (q4 以降は上流 api.kotoba.cloud の
+503/504 嵐で session 無しの TIMEOUT、5 分あたり 94 件。回復後に再走)。
+
+**費用の内訳 (G3、Opus 5、$6.71 / 10 query)**: cache write 74% / cache read 17% / output 9%。
+ctx0 = 58k tok のうち **44.6k を毎 session 書き直している** —— 同一 prompt を続けて 2 回でも、`--resume` でも
+write 44.6k / read 12k。hook 出力 7 本の diff と `git status` は 1 分間同一なので、変動要因は harness の
+prompt 組み立ての中 (外からは特定不能、product feedback 下書き)。symbol-index の出力は call あたり 1–3k で
+支配項ではない。hermes 側は 1 call 18.5k tok、`cache_read_tokens` は 0 だが edge が
+`prompt_tokens_details.cached_tokens` を通していないので **未測定** (0 ではない)。
+
+**h44: 裏取り call は『出力に確かめる材料が無い』から起きる。** G3 は 10/10 で最初の call が索引で答えを出し、
+残りは裏取りだった (q9: `--dependents` 7 件の後 rg/sed 10 call、q8: exact 3 件の後 tree 全体に rg 2 回、
+q1–q7: snippet を sed で読み直し)。着地: `--dependents` に各定義の call site 行 (≤3、今 file から読む、
+`--no-sites`)、`find` に網羅性の 1 行 (exact/substring・scanned・built) と「snippet は今 file から読んだ」、
+CLAUDE.md に「sed / grep / rg で読み直さない」の 1 文。
+
+| q | G3 → G4 tool | API | tok | wall |
+|---|---|---|---|---|
+| q1 | 4 → **1** | 5 → 2 | 299k → 119k | 165 s → 38 s |
+| q9 | 11 → **4** | 12 → 5 | 795k → 313k | 151 s → 96 s |
+| q8 | 6 → **2** | 7 → 3 | 442k → 184k | 107 s → 69 s |
+
+3 query 合計: tool 21 → 7 (−67%)、tok 1.54M → 0.62M (−60%)、$2.76 → $1.91 (−31%。床は session ごとの
+cache write 44.6k ≈ $0.45)。test 130/0、壊した写し 2 通りで対応する check だけ赤。
+
 ### iteration 20 (2026-09-18) — 同 ns 別 file の参照、`closure <file>`、plugin-hermes の memo
 
 - 参照列の穴を塞いだ: bare 参照は「同 file の定義名」でなく「core (sci の `clojure.core` public 674 個 +
