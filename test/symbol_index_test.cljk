@@ -541,6 +541,25 @@
       (check! "--dependents lists every definition referencing base, across alias/refer/qualified, at depth 1"
               (and (= 0 code) (re-find #"dependents of a.core/base: 4 definitions in 1 level\(s\)" out)
                    (every? #(re-find (js/RegExp. (str "defn " % " — ")) out) ["uses-base" "via-alias" "via-refer" "via-full"])) out))
+    ;; iteration 21: depth-1 の各 dependent に call site (定義 span 内で leaf を参照する行) を添える。
+    ;; alias (ac/base)・refer (base)・qualified (a.core/base) の 3 形とも当たり、行番号は file の行
+    (let [{:keys [code out]} (run top "find" "base" "--dependents")]
+      (check! "--dependents prints the call site line under each depth-1 dependent (alias / refer / qualified forms)"
+              (and (= 0 code)
+                   (re-find #"(?m)^      2\| \(defn via-alias \[z\] \(ac/base z\)\)$" out)
+                   (re-find #"(?m)^      3\| \(defn via-refer \[z\] \(base z\)\)$" out)
+                   (re-find #"(?m)^      4\| \(defn via-full \[z\] \(a.core/base z\)\)$" out)
+                   (re-find #"(?m)^      3\| \(defn uses-base \[y\] \(base y\)\)$" out)
+                   (re-find #"call sites inside each depth-1 definition" out)) out))
+    (let [{:keys [code out]} (run top "find" "base" "--dependents" "--no-sites")]
+      (check! "--no-sites omits the call site lines and the note" (and (= 0 code) (not (re-find #"(?m)^      \d+\| " out)) (not (re-find #"call sites" out))) out))
+    (let [{:keys [code out]} (run top "find" "base")]
+      (check! "find prints the coverage evidence line (exact/substring split, scanned count, built time)"
+              (and (= 0 code) (re-find #"(?m)^  exact 1 / substring 1 · scanned \d+ files, unreadable 0 \(built \d{4}-\d\d-\d\dT\d\d:\d\dZ\); exact = every definition named exactly this" out)
+                   (re-find #"snippet lines are read from the file now" out)) out))
+    (let [{:keys [code out]} (run top "find" "nonexistent-sym")]
+      (check! "0 hits: no coverage line, no snippet note (nothing to vouch for)"
+              (and (= 1 code) (not (re-find #"exact \d+ / substring" out)) (not (re-find #"snippet lines" out))) out))
     (let [{:keys [code out]} (run top "find" "leaf" "--dependents" "--depth" "1")]
       (check! "--depth 1 stops at direct dependents (a only)"
               (and (= 0 code) (re-find #"1 definitions in 1 level" out) (re-find #"defn a — " out) (not (re-find #"defn top — " out))) out))
