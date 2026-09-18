@@ -849,6 +849,34 @@
       (vswap! rows into (scan-lines text (str "^(?:" col "\t){7}(?:" col ",)?(?:" (str/join "|" (map qual chunk)) ")(?:," col ")?$"))))
     (->> @rows (remove #(= "ns" (:kind %))) (distinct))))
 
+(def site-limit 3)
+
+(def sym-char-re
+  "symbol を成す文字 (境界判定用)。`/` は ns/alias の区切りなので境界側 —— `db/apply-pin-advance` の leaf を当てるため。"
+  "[^\\s()\\[\\]{}\"'`,;/]")
+
+(defn- reference-sites
+  "iteration 21: dependent (file:line) の定義 span の中で、target の leaf を参照している行を
+  [line text] で返す (最大 limit 件、超過分は :more に)。span は line から次の column-0 `(` まで。
+  09-18 の Claude Code 腕 G3 q9: --dependents が 7 件を 1 call で出した後、agent が rg / sed で
+  call site を確かめるのに 10 call かけた (prompt が『読んで確かめよ』)。証拠を出力に同梱する。"
+  [file line leafs limit]
+  (try
+    (let [lines (str/split-lines (.readFileSync fs (.join path top file) "utf8"))
+          start (dec line)
+          end (loop [i (inc start)]
+                (cond (>= i (count lines)) i
+                      (re-find #"^\(" (nth lines i)) i
+                      :else (recur (inc i))))
+          re (js/RegExp. (str "(?<!" sym-char-re ")(?:" (str/join "|" (map escape-re leafs)) ")(?!" sym-char-re ")"))
+          ;; def 行自身も見る (1 行定義 `(defn f [z] (ac/base z))` は def 行に site が在る)
+          hits (for [i (range start end)
+                     :let [t (nth lines i)]
+                     :when (.test re t)]
+                 [(inc i) (str/trim t)])]
+      {:sites (take limit hits) :more (max 0 (- (count hits) limit))})
+    (catch :default _ {:sites [] :more 0 :unreadable true})))
+
 (defn- cmd-dependents
   "find <sym|ns/sym> --dependents [--depth N|all]: この定義を参照する定義を、深さごとに列挙する。
   『X を変えたら見直すべき定義』を 1 call で。写しは hash で畳む。exit 1 = 被依存 0 件。"
@@ -885,15 +913,31 @@
                           (when (> total-unfolded total) (str " (" (- total-unfolded total) " identical folded)"))
                           " — depth " (if (>= max-depth 1000) "all" max-depth) (when (< max-depth 1000) "; --depth all for the whole closure")))
             (age-warning header)
-            (let [limit 60 printed (volatile! 0)]
+            (let [limit 60 printed (volatile! 0)
+                  sites? (not (some #{"--no-sites"} args))
+                  leafs (distinct (map second root-keys))
+                  built (built-ms header)]
               (doseq [[d rows] levels]
                 (println (str "  depth " d " (" (count rows) ")"))
                 (doseq [r rows]
-                  (when (< @printed limit) (vswap! printed inc) (println (str "  " (fmt-hit r)))))
+                  (when (< @printed limit)
+                    (vswap! printed inc)
+                    (let [r (relocate r built)]
+                      (println (str "  " (fmt-hit r)))
+                      (when-let [note (relocation-note r)] (println (str "    " note)))
+                      ;; depth 1 だけ call site を添える (root の leaf を span 内で探す)。深い層の site は
+                      ;; 前の層の名前になるので、要るときは find <that-sym> --dependents で 1 段ずつ
+                      (when (and sites? (= d 1) (not (:gone r)))
+                        (let [{:keys [sites more unreadable]} (reference-sites (:file r) (:line r) leafs site-limit)]
+                          (doseq [[ln t] sites] (println (str "      " ln "| " t)))
+                          (when (pos? more) (println (str "      (+" more " more site" (when (> more 1) "s") " in this definition)")))
+                          (when unreadable (println "      (unreadable)")))))))
                 (when (> (count rows) (- limit (min limit @printed)))
                   nil))
               (when (> total limit)
-                (println (str "  … " (- total limit) " more not listed; narrow with --depth 1 or read the level counts"))))
+                (println (str "  … " (- total limit) " more not listed; narrow with --depth 1 or read the level counts")))
+              (when (and sites? (some (fn [[d _]] (= d 1)) levels))
+                (println (str "  (indented `N| …` lines are the call sites inside each depth-1 definition, read from the file now — no grep needed; --no-sites to omit)"))))
             (if (pos? total) 0 1)))))))
 
 (defn- resolve-ref-row
@@ -1048,6 +1092,14 @@
                       (when (> (count hits) n) (str " (" (- (count hits) n) " identical folded"
                                                     (cond unfold? ", listed" (>= n 2) "; --unfold lists them" :else "") ")"))
                       (when in-filter (str " --in " in-filter)) (when exact? " --exact")))
+        ;; iteration 21: 網羅性の根拠を 1 行で出す。09-18 の Claude Code 腕 G3 q8 (多重 hit) は exact 3 件を 1 call で
+        ;; 得た後、索引が全部を拾っているか rg を tree 全体に 2 回かけて確かめた (+5 call、prompt が『全部挙げよ』)。
+        ;; 「何を走査した索引か」が出力に無いと、agent は索引の外を疑う
+        (when (and (pos? n) (<= n find-limit) (not exact?))
+          (println (str "  exact " (count exact) " / substring " (- n (count exact))
+                        " · scanned " (:scanned header) " files" (when (= "0" (:unreadable header)) ", unreadable 0")
+                        " (built " (subs (str (:built-at header)) 0 (min 16 (count (str (:built-at header))))) "Z)"
+                        "; exact = every definition named exactly this in the scanned tree (~ = nested); a file newer than the index is read fresh on hit")))
         (age-warning header)
         (if (<= n find-limit)
           (doseq [h ranked]
@@ -1080,7 +1132,11 @@
             (let [{:keys [file line sym kind gone] :as h} (relocate h built)]
               (when (> n 1) (println (str "== " kind " " sym " — " file ":" line)))
               (when-let [note (relocation-note h)] (println note))
-              (when-not gone (println (snippet file line))))))
+              (when-not gone (println (snippet file line)))))
+          ;; iteration 21: snippet は今 file から読んだ本文 (索引の写しではない) と言う。09-18 の腕 G3 は
+          ;; q1–q7 の 7/7 で find の後に sed / grep で同じ行を読み直していた (2 tool、Hermes 腕 H は 1 tool)
+          (when (seq pick)
+            (println "  (snippet lines are read from the file now, line numbers as in the file — no need to sed/grep them again)")))
         (when (zero? n) (suggest-near text (first leafs) keep?))
         ;; iteration 19: 被依存の口を 1 行で示す (09-17 の Claude Code 腕 G q9: --dependents を知らず rg で探して
         ;; turn 上限。新しい口は出力に書かないと使われない)
