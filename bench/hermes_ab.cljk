@@ -187,7 +187,7 @@
                         (count (filter #(re-find #"^(cat|sed -n|head|tail) " %) cmds)))}))))
 
 (defn run-one-claude
-  "腕 = Claude Code headless (`claude -p … --output-format json`)。CLAUDE.md の 1 行 (Read の前に索引を引く) が
+  "腕 = Claude Code headless (`claude -p … --output-format json`)。AGENTS.md の 1 行 (Read の前に索引を引く) が
   効くかを測る。build は disallow (古い root の写しで新しい索引を潰さない)。"
   [{:keys [id] :as q} {:keys [condition out-dir]}]
   (let [args ["-p" (prompt-for q) "--output-format" "json" "--allowedTools" "Bash,Read,Grep,Glob" "--max-turns" "15"
