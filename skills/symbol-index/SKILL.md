@@ -53,5 +53,5 @@ symbol-index build            # 索引生成 (incremental。--full で全読み)
 
 repo: https://github.com/kotoba-lang/symbol-index
 `kbb --backend sci scripts/install.cljk` が `~/.local/bin/symbol-index` の symlink と
-`~/.hermes/skills/software-development/symbol-index/` (hermes が在れば) を置き、CLAUDE.md /
+`~/.hermes/skills/software-development/symbol-index/` (hermes が在れば) を置き、AGENTS.md /
 AGENTS.md 向けの 1 行を印字する。`--check` で導入状態を検査 (未導入は exit 2)。

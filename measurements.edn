@@ -199,7 +199,7 @@
    "AGENTS.md の 1 行 (A2) は CLI 呼び出しを 0/8 しか生まなかった。改善分 (139k→109k tok) は .kotoba-cache/symbol-index.tsv を agent が直接 grep したことによる"
    "skill を置くだけ (B) では agent が skill を選ぶのは 2/8。選んだのは workspace-search skill を見に行った回だけ (2/2 が step 0 の pointer に従って正解)。symbol-index skill 自体を skill_view した run は 0"
    "先読み (C) は 8/8 正解、毎 run CLI を 1-2 回呼んで終了。skill 本文は 1 call あたり +1.7k tok (16.9k vs 15.2k)"
-   "Hermes は cwd の AGENTS.md と CLAUDE.md を両方注入する。この superproject では両者がほぼ同文なので 1 call の床が ~15k tok になっている (本 iteration の対象外、記録のみ)"]
+   "Hermes は cwd の AGENTS.md を両方注入する。この superproject では両者がほぼ同文なので 1 call の床が ~15k tok になっている (本 iteration の対象外、記録のみ)"]
   :decision "導入は『skill を置く』だけでは足りない。code を触る cron job には skills: [symbol-index] を付け、対話は hermes chat -s symbol-index。workspace-search skill の step 0 に pointer を置いた (それを見に行った run は従う)"
   :verdict :landed}
 
@@ -404,7 +404,7 @@
  {:id :closing-2026-09-15
   :date "2026-09-15"
   :landed "iteration 2-14 (:h1-:h34) は main に着地、west pin は最新 (superproject の west.yml)。root の scripts/symbol-index.cljk は byte 同一の写し"
-  :for-other-agents "skills/symbol-index/SKILL.md (agent 非依存の正本) + scripts/install.cljk (--check 付き)。CLAUDE.md は superproject 側で 1 行済み、AGENTS.md はそこから生成"
+  :for-other-agents "skills/symbol-index/SKILL.md (agent 非依存の正本) + scripts/install.cljk (--check 付き)。AGENTS.md は superproject 側で 1 行済み、AGENTS.md はそこから生成"
   :open [{:what "agent 側の K2/K4/K5 (:h24 :h26 :h30 :h31 :h32 :h34)" :how "hermes のある host で bench/hermes_ab.cljk を腕 D として回す / superproject の scripts/agent-usage-report.cljk --since 7 を翌週回して rr-nowrite を baseline (79%) と比べる"}
          {:what ":h34 の build 時間コスト" :how "v2 と v3 の full build を交互 A/B (未測定)"}
          {:what "kotoba find (-prune 相当が入ったら)" :how ":h33 の条件が満たされたら walk を差し替えて交互 A/B"}]
@@ -564,25 +564,25 @@
   :arm-H {:condition "hermes + skill (規則 0 / --unfold / --dependents / closure) + iteration 18 CLI" :n 10
           :correct "10/10" :timeouts 0 :tool-calls-mean 1.5 :si-mean 1.1 :api-mean 2.5 :total-tok-mean 46604 :file-reads 0 :wall-mean-s 112
           :q9 "find --dependents を最初に引いて 7 件正解 (3 tool: 裏取りの grep と sed。prompt が『読んで確かめよ』)" :q10 "closure 1 tool / 18 s" :q8 "4 tool、580 s (API 待ち) だが正解"}
-  :arm-G {:condition "Claude Code headless、CLAUDE.md の 1 行 (Read の前に索引を引く) のみ。superproject 本体 checkout の root 写し scripts/symbol-index.cljk は v4 のまま (本体は mktg-tick branch で main から 20 遅れ、規則で触らない)" :n 10
+  :arm-G {:condition "Claude Code headless、AGENTS.md の 1 行 (Read の前に索引を引く) のみ。superproject 本体 checkout の root 写し scripts/symbol-index.cljk は v4 のまま (本体は mktg-tick branch で main から 20 遅れ、規則で触らない)" :n 10
           :correct "9/10" :timeouts 0 :tool-calls-mean 6.1 :si-mean 2.3 :api-mean 7.1 :total-tok-mean 438416 :file-reads 11 :wall-mean-s 90 :cost-usd 8.02
-          :finding "10/10 で root 写し (v4) が v5 索引を REFUSE → status / grep / 上流 orgs/kotoba-lang/symbol-index を探して復旧 (+3〜5 tool)。q9 は --dependents を知らず (CLAUDE.md にも v4 写しにも無い) rg で探して turn 上限 8 で答え無し。token は cache read が 9 割 (CLAUDE.md + hook の文脈 ≈ 190k/turn)"}
+          :finding "10/10 で root 写し (v4) が v5 索引を REFUSE → status / grep / 上流 orgs/kotoba-lang/symbol-index を探して復旧 (+3〜5 tool)。q9 は --dependents を知らず (AGENTS.md にも v4 写しにも無い) rg で探して turn 上限 8 で答え無し。token は cache read が 9 割 (AGENTS.md + hook の文脈 ≈ 190k/turn)"}
   :summary {:hermes-D->H {:correct ["7/8" "10/10"] :tool-calls [3.1 1.5] :api [4.0 2.5] :total-tok [72798 46604] :timeouts [1 0]}
             :claude-G "9/10、6.1 tool —— 索引そのものではなく『root 写しの drift』と『新しい口が入口文書に無い』の 2 つが費用"}
   :landed-as-iteration-19 ["版ずれの向きで REFUSE 文を変える: 索引が script より新しいときは『新しい script を使え、この写しで build するな』(build すると古い版で索引を潰す)" "find の出力末尾に `(who references it: find <sym> --dependents | closure <ns>/<sym>)` の 1 行" "bench: q9 / q10 / --agent claude / 全出現 grade / --max-turns 15"]
-  :not-landed ["superproject 本体 checkout の root 写しの同期 (本体は触らない規則。main には da084e1 で同期済み、本体が main に追いつけば消える)" "CLAUDE.md の 1 行に --dependents / closure を足す (superproject 側、次)"]
+  :not-landed ["superproject 本体 checkout の root 写しの同期 (本体は触らない規則。main には da084e1 で同期済み、本体が main に追いつけば消える)" "AGENTS.md の 1 行に --dependents / closure を足す (superproject 側、次)"]
   :verdict :landed}
 
  ;; ---- closing 2026-09-18 (session 2026-09-17: iteration 15–19) ----
  {:id :closing-2026-09-18
   :date "2026-09-18"
   :landed {:symbol-index "main 4b5c48d (iteration 15 構造 hash v4 → 16 登録簿 fallback / --unfold → 17 closure bench → 18 参照列 v5 / find --dependents / closure → 19 腕 G/H / 版ずれ文言 / --dependents ヒント)。test 118/0。skill と ~/.local/bin/symbol-index は install --check clean"
-           :superproject "main 29cb0e6: west pin symbol-index → 4b5c48d (3c91f06)、root scripts/symbol-index.cljk は blob 0ce8e8f1 で上流と同一、CLAUDE.md の索引行に --dependents / closure / 版ずれ規則 (AGENTS.md 再生成済み)"
+           :superproject "main 29cb0e6: west pin symbol-index → 4b5c48d (3c91f06)、root scripts/symbol-index.cljk は blob 0ce8e8f1 で上流と同一、AGENTS.md の索引行に --dependents / closure / 版ずれ規則 (AGENTS.md 再生成済み)"
            :kotoba-lang.org "main 37d504b: llms.txt / llms-full.txt に『Navigating Kotoba source as an agent』節。Cloudflare 自動 deploy、live 確認"
            :kotoba.cloud "main dcfa45e2: 同節。npm run deploy → Version 61836dae-4d7e-4010-ad74-a4b46d76dea2、live 確認"}
   :evidence {:bench-results "bench/results/2026-09-17-{D,E,F,G,H}.jsonl (+ .regraded)、structural_hash_all / closure_hash_all の edn" :ledger ":h35 – :h41"}
   :verification "symbol-index test 118/0 (壊し方の反証: 3 通り × iteration 15/16/18)。kotoba-lang site build 20,797 assertions 0 failures。app-kotoba-cloud npm test 202 tests 0 failures + audit + worker/workerd tests + wrangler deploy"
-  :open [{:what "hermes 以外の agent (Claude Code) で --dependents を使わせる" :how "CLAUDE.md には入れた (29cb0e6)。腕 G を再走: `kbb --backend sci orgs/kotoba-lang/symbol-index/bench/hermes_ab.cljk G2-claude <out> --agent claude` → q9 が OK になり tool call が 6.1 から下がるかを見る ($0.8/query)"}
+  :open [{:what "hermes 以外の agent (Claude Code) で --dependents を使わせる" :how "AGENTS.md には入れた (29cb0e6)。腕 G を再走: `kbb --backend sci orgs/kotoba-lang/symbol-index/bench/hermes_ab.cljk G2-claude <out> --agent claude` → q9 が OK になり tool call が 6.1 から下がるかを見る ($0.8/query)"}
          {:what "参照列の穴: 同 ns の別 file にある定義への bare 参照が落ちる" :how "scan-file の local-syms を file から ns 単位に (build 時に ns → 定義名の表が要る = 2 pass)。効果は bench/closure_hash.cljk の :refs で測る"}
          {:what "closure hash を memo key に使う実装 (compile / test 結果の cache)" :how "plugin-hermes の kotoba_check に closure を key にした cache を足し、hit 率を測る。:h39 の blast radius (最大 60,957) が無効化の上限"}
          {:what "kotoba-lang / app-kotoba-cloud の west pin" :how "docs のみの変更なので進めていない。進めるなら scripts/west-pin-put.cljk kotoba-lang 37d504b / app-kotoba-cloud dcfa45e2"}
@@ -603,16 +603,16 @@
   :not-measured ["core 除外の漏れ (kotoba stdlib の名前は core に無いので bare 参照として残る = 索引に無ければ落ちるだけ)" "amu の定義 CID と索引の closure hash の一致率"]
   :verdict :landed}
 
- ;; ---- iteration 20b (2026-09-18) — Claude Code 腕 G2: root 写しと CLAUDE.md を揃えた状態で再走 (:closing-2026-09-18 :open 1) ----
+ ;; ---- iteration 20b (2026-09-18) — Claude Code 腕 G2: root 写しと AGENTS.md を揃えた状態で再走 (:closing-2026-09-18 :open 1) ----
  {:iteration 20 :id :h43-claude-arm-g2-synced
   :date "2026-09-18"
   :hypothesis "腕 G の費用 (6.1 tool) は索引でなく『root 写しの drift』と『--dependents が入口文書に無い』だった。両方揃えれば q9 が通り tool call が下がる"
-  :arm-G2 {:condition "Claude Code headless、CLAUDE.md に --dependents / closure / 版ずれ規則 (29cb0e6)、root 写し = 上流 (iteration 19)" :n 10
+  :arm-G2 {:condition "Claude Code headless、AGENTS.md に --dependents / closure / 版ずれ規則 (29cb0e6)、root 写し = 上流 (iteration 19)" :n 10
            :correct "10/10 (grader の窓を 200 → 1500 字に広げて再採点。q9 は正しい 7 件を table に `:168` の形で並べ、旧窓では PATH-ONLY)" :tool-calls-mean 3.1 :si-mean 1.1 :api-mean 4.1 :total-tok-mean 259634 :file-reads 9 :wall-mean-s 48 :cost-usd 6.49
            :q9 "--dependents を最初に引いて 7 件を得たあと、rg と sed で裏取り 7 tool (prompt の『読んで確かめよ』)。hermes 腕 H も同じ形で 3 tool"
            :q10 "closure 1 tool / 2 turn"}
   :G->G2 {:correct ["9/10" "10/10"] :tool-calls [6.1 3.1] :api [7.1 4.1] :total-tok [438416 259634] :cost-usd [8.02 6.49] :file-reads [11 9]
-          :note "REFUSE → 上流探し の復旧 (+3〜5 tool) が消えた。残る差 (H の 1.5 に対し 3.1) は Claude が『確かめよ』に対し sed / rg で裏取りする分と、cache read 主体の token (CLAUDE.md + hook ≈ 60k/turn)"}
+          :note "REFUSE → 上流探し の復旧 (+3〜5 tool) が消えた。残る差 (H の 1.5 に対し 3.1) は Claude が『確かめよ』に対し sed / rg で裏取りする分と、cache read 主体の token (AGENTS.md + hook ≈ 60k/turn)"}
   :grader-fix "basename からの窓 200 → 1500 字 (G / H の採点は不変: 9/10 → 9/10、10/10 → 10/10)"
   :verdict :landed}
 
@@ -621,7 +621,7 @@
   :date "2026-09-18"
   :observation "superproject 本体で朝の状態: root 写し v5 / 索引 v2 → find は 10/10 で REFUSE (`index is v2, this script needs v5`)。~/.local/bin/symbol-index は v2 の別 clone、hermes skill は 09-15 の写し、auto_load 無し、plugin-hermes 未導入。install --check = problems 2"
   :landed-first ["索引 v5 で rebuild (588,930 symbols / 50,440 files)" "install.cljk: symlink を orgs/ の checkout に、skill 更新 → --check clean" "hermes: skills.auto_load [symbol-index] を main + profile 64/64 (superproject を trusted_project_dirs に持つもの)" "plugin-hermes: plugins/kotoba 配置 + enabled + KOTOBA_WORKSPACE、gateway 再起動 (owner が手で。auto mode の classifier が ~/.hermes/ 配下の書込みと probe.py を 3 回拒否)"]
-  :arm-G3 {:condition "Claude Code headless、v5 索引 rebuild 後、CLAUDE.md は 29cb0e6 のまま" :n 10
+  :arm-G3 {:condition "Claude Code headless、v5 索引 rebuild 後、AGENTS.md は 29cb0e6 のまま" :n 10
            :correct "10/10" :tool-calls-mean 3.5 :si-mean 1.2 :api-mean 4.5 :total-tok-mean 278497 :file-reads 1 :wall-mean-s 100 :cost-usd 6.71
            :first-call "10/10 で最初の tool call が symbol-index で、そこで答えが出ている。残りは裏取り: q9 は --dependents 7 件の後 rg/sed 10 call、q8 は exact 3 件の後 tree 全体に rg 2 回、q1–q7 は snippet を sed/grep で読み直し (2 tool、Hermes 腕 H は 1)"
            :q1-anomaly "1 file への grep+sed が Bash の 120 s timeout → 同時に走らせた Hermes 腕との機械競合"}
@@ -632,18 +632,18 @@
                       :share {:cache-write 0.74 :cache-read 0.17 :output 0.09}
                       :per-session "静的 prefix 11,975–13,528 tok だけが cache hit、44,58x tok を毎 session 書き直す (10/10 session、±10 tok)"
                       :probe "同一 prompt を続けて 2 回: 2 回目も write 44,638 / read 11,975。--resume で同 session を継いでも write 44,628。SessionStart hook 7 本の stdout を 2 回走らせて diff = 同一。git status --porcelain の hash も 1 分間同一。--session-id の再利用は拒否 (already in use) → 変動要因は harness の prompt 組み立ての中、外からは特定不能 (product feedback 下書き)"
-                      :ctx0 58114 :ctx0-composition "静的 12k (system + tools) + CLAUDE.md 40,971 B (≈20k tok) + SessionStart hook 14 KB 生 + 30 KB persisted preview + env"
+                      :ctx0 58114 :ctx0-composition "静的 12k (system + tools) + AGENTS.md 40,971 B (≈20k tok) + SessionStart hook 14 KB 生 + 30 KB persisted preview + env"
                       :symbol-index-share "call あたり 1–3k tok。費用の支配項ではない"}
   :hermes-cost {:per-call-input 18500 :cache-read-reported 0
                 :note "edge (app-kotoba-cloud research_authority upstream-usage-receipt) が :cachedInputTokens 0 を固定し、prompt_tokens_details.cached_tokens を通していない → hermes の cache_read_tokens=0 は『hit 無し』ではなく『未測定』。上流は HF Inference Endpoints (orcarouter/Qwen3.8-Flash-Next-Uncensored-NVFP4)、murakumo の vLLM policy は --enable-prefix-caching true 既定 (kv_policy.cljk:37) だがこの slot は別"}
-  :hypothesis-h44 "裏取り call は『出力に確かめる材料が無い』から起きる。--dependents に call site 行、find に網羅性の 1 行と『snippet は今 file から読んだ』を同梱し、CLAUDE.md に 1 文 (再読みしない) を足せば、q1/q8/q9 の tool call が下がる"
-  :arm-G4 {:condition "Claude Code headless、iteration 21 (71f76817) の root 写し + CLAUDE.md 1 文 (superproject 6ff82190)" :only ["q1" "q8" "q9"]
+  :hypothesis-h44 "裏取り call は『出力に確かめる材料が無い』から起きる。--dependents に call site 行、find に網羅性の 1 行と『snippet は今 file から読んだ』を同梱し、AGENTS.md に 1 文 (再読みしない) を足せば、q1/q8/q9 の tool call が下がる"
+  :arm-G4 {:condition "Claude Code headless、iteration 21 (71f76817) の root 写し + AGENTS.md 1 文 (superproject 6ff82190)" :only ["q1" "q8" "q9"]
            :G3->G4 {:q1 {:tools [4 1] :api [5 2] :tok [298765 118978] :wall-s [165 38] :cost [0.77 0.52]}
                     :q9 {:tools [11 4] :api [12 5] :tok [794691 312947] :wall-s [151 96] :cost [1.14 0.76]}
                     :q8 {:tools [6 2] :api [7 3] :tok [441916 183518] :wall-s [107 69] :cost [0.85 0.63]}
                     :sum {:tools [21 7] :tok [1535372 615443] :cost [2.76 1.91]}}
            :correct "3/3"
-           :remaining "q8/q9 は find の後に status を 1 回 (CLAUDE.md の『status → build』を読んだ形)、q9 はさらに rg 1 回と alias 確認 1 回。費用の床は session ごとの cache write 44.6k (≈$0.45) で、tool を 1 にしても $0.52"}
+           :remaining "q8/q9 は find の後に status を 1 回 (AGENTS.md の『status → build』を読んだ形)、q9 はさらに rg 1 回と alias 確認 1 回。費用の床は session ごとの cache write 44.6k (≈$0.45) で、tool を 1 にしても $0.52"}
   :tests "symbol-index 130/0 (壊し方 2 通り: site 本体を空に → site check だけ赤、網羅行を消す → その check だけ赤)"
   :not-measured ["腕 I の残り 7 query (上流 5xx)" "hermes の prefix cache hit 率 (edge の透過が要る → app-kotoba-cloud agent/cached-tokens-passthrough)" "hook 出力を痩せさせたときの ctx0 (次)"]
   :verdict :landed}]

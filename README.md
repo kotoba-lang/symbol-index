@@ -173,7 +173,7 @@ prompt 組み立ての中 (外からは特定不能、product feedback 下書き
 残りは裏取りだった (q9: `--dependents` 7 件の後 rg/sed 10 call、q8: exact 3 件の後 tree 全体に rg 2 回、
 q1–q7: snippet を sed で読み直し)。着地: `--dependents` に各定義の call site 行 (≤3、今 file から読む、
 `--no-sites`)、`find` に網羅性の 1 行 (exact/substring・scanned・built) と「snippet は今 file から読んだ」、
-CLAUDE.md に「sed / grep / rg で読み直さない」の 1 文。
+AGENTS.md に「sed / grep / rg で読み直さない」の 1 文。
 
 | q | G3 → G4 tool | API | tok | wall |
 |---|---|---|---|---|
@@ -200,13 +200,13 @@ cache write 44.6k ≈ $0.45)。test 130/0、壊した写し 2 通りで対応す
 | 腕 | 正解 | tool call | API call | token | file read |
 |---|---|---|---|---|---|
 | H: hermes + iteration 18 (q1–q10、被依存 / closure 込み) | **10/10** | **1.5** | **2.5** | 46,604 | 0 |
-| G: Claude Code headless (CLAUDE.md の 1 行のみ、root 写しは v4) | 9/10 | 6.1 | 7.1 | 438,416 | 11 |
-| G2: 同、root 写しと CLAUDE.md を揃えた翌日 (09-18) | **10/10** | 3.1 | 4.1 | 259,634 | 9 |
+| G: Claude Code headless (AGENTS.md の 1 行のみ、root 写しは v4) | 9/10 | 6.1 | 7.1 | 438,416 | 11 |
+| G2: 同、root 写しと AGENTS.md を揃えた翌日 (09-18) | **10/10** | 3.1 | 4.1 | 259,634 | 9 |
 
 G の費用は索引ではなく 2 つの穴: ① superproject 本体の root 写し `scripts/symbol-index.cljk` が v4 のまま
 v5 索引を REFUSE し、10/10 で agent が上流を探して復旧した (+3〜5 call)。拒否文が「run build」だと古い版で
 索引を作り直して潰すので、**索引の方が新しいときは『新しい script を使え、この写しで build するな』**に変えた。
-② `--dependents` を知らず (CLAUDE.md にも写しにも無い) `rg` で探して turn 上限 → `find` の出力末尾に
+② `--dependents` を知らず (AGENTS.md にも写しにも無い) `rg` で探して turn 上限 → `find` の出力末尾に
 被依存と closure の口を 1 行出す。**新しい口は出力と入口文書に書かないと使われない。**
 bench には q9 (被依存 7 件)、q10 (closure、期待は実行直前に取る)、`--agent claude` を足した。
 
@@ -332,7 +332,7 @@ kbb --backend sci scripts/install.cljk --check   # 導入状態の検査。未�
 
 - **skill の正本は `skills/symbol-index/SKILL.md`** (agent 非依存: 使い方・判断の規則・数値)。
   Hermes は `~/.hermes/skills/software-development/symbol-index/` に写し、Claude Code は
-  superproject の CLAUDE.md に 1 行 (install が印字する)、Codex は AGENTS.md (CLAUDE.md から生成)。
+  superproject の AGENTS.md に 1 行 (install が印字する)、Codex は AGENTS.md (AGENTS.md から生成)。
 - **Hermes は先読みまでが導入** (`hermes chat -s symbol-index` / cron の `skills:`)。A/B
   (`bench/hermes_ab.cljk`、`measurements.edn` :iteration 5): 先読みで 8/8 正解・token 2.7 分の
   1・API call 2.5 分の 1・壁時計 1/10。置くだけでは agent が選ぶのは 2/8。

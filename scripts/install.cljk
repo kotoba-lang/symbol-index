@@ -7,7 +7,7 @@
 ;; 置くもの:
 ;;   ~/.local/bin/symbol-index  → <repo>/bin/symbol-index の symlink (kbb > nbb > bb を選ぶ launcher)
 ;;   ~/.hermes/skills/software-development/symbol-index/SKILL.md  (~/.hermes が在るときだけ、skills/ の写し)
-;; 印字するもの: CLAUDE.md / AGENTS.md / .cursorrules 等に貼る 1 行 (agent が「Read の前に引く」ため)。
+;; 印字するもの: AGENTS.md / .cursorrules 等に貼る 1 行 (agent が「Read の前に引く」ため)。
 ;;
 ;; 何も黙って上書きしない: symlink が別の実体を指していれば REFUSE (exit 2)。skill の写しは
 ;; 内容が違うときだけ更新し、その旨を印字する。
@@ -85,7 +85,7 @@
     (problem! (str "launcher failed: " (str (.-stderr r)) (str (.-stdout r))))))
 
 (say "")
-(say "AGENTS.md / CLAUDE.md に貼る 1 行:")
+(say "AGENTS.md に貼る 1 行:")
 (say "- コードを Read / grep する前に `symbol-index <sym|file|ns>` を引く (exit 0 hit / 1 なし / 2 拒否)。outline の #hash が同じなら本文は同じ、読み直さない。")
 (say "hermes: `hermes chat -s symbol-index` (先読み。置くだけでは 2/8 しか選ばない実測)")
 (say (str "CHECKS\t" (if (seq @problems) "with problems" "clean") "\tproblems=" (count @problems)))
